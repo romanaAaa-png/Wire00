@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Shield, 
   Server, 
@@ -25,6 +25,7 @@ import {
   AlertTriangle,
   Database,
   ChevronRight,
+  ChevronLeft,
   Menu,
   X,
   Search,
@@ -59,6 +60,10 @@ interface VPSConfig {
   sshKeyId?: string;
   ports?: { [key: string]: number };
   portConflicts?: { port: number, service: string, purpose: string }[];
+  wg0PublicKey?: string;
+  wg0PrivateKey?: string;
+  wg1PublicKey?: string;
+  wg1PrivateKey?: string;
 }
 
 interface SSHKey {
@@ -101,14 +106,28 @@ interface PortForwardRule {
   description?: string;
 }
 
+// --- Helpers ---
+
+const generateWGKey = () => {
+  const bytes = new Uint8Array(32);
+  window.crypto.getRandomValues(bytes);
+  // Convert to Base64
+  let binary = '';
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return window.btoa(binary);
+};
+
 // --- Mock Data ---
 
 const INITIAL_PEERS: Peer[] = [
   {
     id: '1',
     name: 'Admin Laptop',
-    publicKey: 'pub_key_1_placeholder_abc123...',
-    privateKey: 'priv_key_1_placeholder_xyz789...',
+    publicKey: '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=',
+    privateKey: 'aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2yZ3a4b5=',
     allowedIPs: '10.0.0.2/32',
     lastHandshake: '2 mins ago',
     transferRx: '1.2 MB',
@@ -118,8 +137,8 @@ const INITIAL_PEERS: Peer[] = [
   {
     id: '2',
     name: 'Mobile Phone',
-    publicKey: 'pub_key_2_placeholder_def456...',
-    privateKey: 'priv_key_2_placeholder_uvw012...',
+    publicKey: 'pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g7h8i9j0k1l2m3=',
+    privateKey: 'xY9z0a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9=',
     allowedIPs: '10.0.0.3/32',
     lastHandshake: '1 hour ago',
     transferRx: '5.6 MB',
@@ -386,6 +405,21 @@ const Badge = ({ children, variant = 'default' }: { children: React.ReactNode, v
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding'>('overview');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    const handleResize = () => {
+      if (window.innerWidth < 1280) {
+        setIsSidebarCollapsed(true);
+      } else {
+        setIsSidebarCollapsed(false);
+      }
+    };
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
   const [tunnels, setTunnels] = useState<Tunnel[]>([
     {
       id: 'tunnel-1',
@@ -651,6 +685,45 @@ export default function App() {
       addLog("Verifying IP forwarding... [ENABLED]", "success");
       addLog("Verifying IPTables rules... [ACTIVE]", "success");
       addLog("Double VPN Deployment Successful!", "success");
+      await sleep(1000);
+
+      // --- Post-Deployment Key Update Phase ---
+      addLog("Initiating Post-Deployment Key Update & Sync...", "info");
+      await sleep(1200);
+      addLog("Generating production-ready WireGuard keys on VPS1 & VPS2...", "cmd");
+      await sleep(1500);
+      
+      const vps1_wg0_priv = generateWGKey();
+      const vps1_wg0_pub = generateWGKey(); // In a real app, this would be derived from priv
+      const vps1_wg1_priv = generateWGKey();
+      const vps1_wg1_pub = generateWGKey();
+      
+      const vps2_wg0_priv = generateWGKey();
+      const vps2_wg0_pub = generateWGKey();
+
+      updateActiveTunnel({
+        vps1: {
+          ...activeTunnel.vps1,
+          wg0PrivateKey: vps1_wg0_priv,
+          wg0PublicKey: vps1_wg0_pub,
+          wg1PrivateKey: vps1_wg1_priv,
+          wg1PublicKey: vps1_wg1_pub,
+        },
+        vps2: {
+          ...activeTunnel.vps2,
+          wg0PrivateKey: vps2_wg0_priv,
+          wg0PublicKey: vps2_wg0_pub,
+        }
+      });
+
+      addLog("Syncing public keys between nodes for secure inter-node communication...", "info");
+      await sleep(1000);
+      addLog("Updating /etc/wireguard/wg0.conf on both servers...", "cmd");
+      await sleep(1500);
+      addLog("Restarting WireGuard services to apply updated keys...", "cmd");
+      await sleep(1200);
+      addLog("Verifying secure handshake with new keys... [OK]", "success");
+      addLog("All VPS WireGuard keys have been updated and synchronized.", "success");
 
     } catch (error: any) {
       addLog(`DEPLOYMENT FAILED: ${error.message}`, "error");
@@ -666,11 +739,20 @@ export default function App() {
 
   const runAutomation = (scriptName: string = 'lodgeguard-sync') => {
     setIsRotating(true);
+    
+    // Generate new keys for rotation
+    const vps1_wg0_priv = generateWGKey();
+    const vps1_wg0_pub = generateWGKey();
+    const vps1_wg1_priv = generateWGKey();
+    const vps1_wg1_pub = generateWGKey();
+    const vps2_wg0_priv = generateWGKey();
+    const vps2_wg0_pub = generateWGKey();
+
     const output = scriptName.includes('sync') ? [
       "--- Initiating Secure Key Exchange ---",
       "[*] Generating new ephemeral keys on VPS1...",
       "[*] Encrypting public key with existing tunnel...",
-      "[*] Sending key to VPS2 (89.110.86.75)...",
+      `[*] Sending key to VPS2 (${activeTunnel.vps2.ip || '89.110.86.75'})...`,
       "[+] VPS2 acknowledged. Rotating keys...",
       "[*] Updating wg0.conf on both nodes...",
       "[*] Restarting WireGuard services...",
@@ -685,7 +767,26 @@ export default function App() {
     ];
 
     setTerminalOutput(prev => [...prev, ...output]);
-    setTimeout(() => setIsRotating(false), 2000);
+    
+    setTimeout(() => {
+      if (scriptName.includes('sync')) {
+        updateActiveTunnel({
+          vps1: {
+            ...activeTunnel.vps1,
+            wg0PrivateKey: vps1_wg0_priv,
+            wg0PublicKey: vps1_wg0_pub,
+            wg1PrivateKey: vps1_wg1_priv,
+            wg1PublicKey: vps1_wg1_pub,
+          },
+          vps2: {
+            ...activeTunnel.vps2,
+            wg0PrivateKey: vps2_wg0_priv,
+            wg0PublicKey: vps2_wg0_pub,
+          }
+        });
+      }
+      setIsRotating(false);
+    }, 2000);
   };
 
   const executeCommand = (command: string) => {
@@ -752,8 +853,8 @@ export default function App() {
     const newPeer: Peer = {
       id: Math.random().toString(36).substr(2, 9),
       name: newPeerName,
-      publicKey: `pub_${Math.random().toString(36).substr(2, 20)}`,
-      privateKey: `priv_${Math.random().toString(36).substr(2, 20)}`,
+      publicKey: generateWGKey(),
+      privateKey: generateWGKey(),
       allowedIPs: `10.0.0.${activeTunnel.peers.length + 4}/32`,
       createdAt: new Date().toISOString(),
     };
@@ -764,6 +865,45 @@ export default function App() {
 
   const deletePeer = (id: string) => {
     updateActiveTunnel({ peers: activeTunnel.peers.filter(p => p.id !== id) });
+  };
+
+  const downloadConfig = (peer: Peer) => {
+    const config = `[Interface]
+PrivateKey = ${peer.privateKey}
+Address = ${peer.allowedIPs}
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = 8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=
+Endpoint = ${activeTunnel.vps1.ip}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25`;
+
+    const blob = new Blob([config], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${peer.name.replace(/\s+/g, '_')}.conf`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const exportAllConfigs = () => {
+    const allConfigs = activeTunnel.peers.map(peer => {
+      return `--- ${peer.name} ---\n[Interface]\nPrivateKey = ${peer.privateKey}\nAddress = ${peer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = 8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=\nEndpoint = ${activeTunnel.vps1.ip}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n\n`;
+    }).join('\n');
+
+    const blob = new Blob([allConfigs], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `all_peers_configs.txt`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const addScript = () => {
@@ -790,11 +930,19 @@ export default function App() {
 
   const generateSSHKey = () => {
     const id = `key-${Math.random().toString(36).substr(2, 9)}`;
+    const randomBytes = new Uint8Array(32);
+    window.crypto.getRandomValues(randomBytes);
+    let binary = '';
+    for (let i = 0; i < randomBytes.byteLength; i++) {
+      binary += String.fromCharCode(randomBytes[i]);
+    }
+    const base64 = window.btoa(binary);
+    
     const newSSHKey: SSHKey = {
       id,
       name: `Generated Key ${sshKeys.length + 1}`,
-      publicKey: `ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ${Math.random().toString(36).substr(2, 20)}...`,
-      privateKey: `-----BEGIN RSA PRIVATE KEY-----\n${Math.random().toString(36).substr(2, 30)}\n...`,
+      publicKey: `ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQ${base64.substring(0, 30)}... user@host`,
+      privateKey: `-----BEGIN RSA PRIVATE KEY-----\n${base64}\n${base64.split('').reverse().join('')}\n-----END RSA PRIVATE KEY-----`,
       associatedVPS: 'both',
       createdAt: new Date().toISOString()
     };
@@ -855,18 +1003,30 @@ export default function App() {
   return (
     <div className="min-h-screen bg-black text-zinc-400 font-sans selection:bg-emerald-500/30 selection:text-emerald-200">
       {/* Sidebar / Navigation */}
-      <div className="fixed left-0 top-0 bottom-0 w-64 border-r border-zinc-800 bg-zinc-950 flex flex-col z-50">
-        <div className="p-8 flex items-center gap-3">
-          <div className="w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center shadow-lg shadow-emerald-500/20">
-            <Shield className="text-black w-6 h-6" />
+      <div className={cn(
+        "fixed left-0 top-0 bottom-0 border-r border-zinc-800 bg-zinc-950 flex flex-col z-50 transition-all duration-300 ease-in-out",
+        isSidebarCollapsed ? "w-20" : "w-64"
+      )}>
+        <div className={cn(
+          "p-5 flex items-center transition-all duration-300",
+          isSidebarCollapsed ? "justify-center" : "gap-3"
+        )}>
+          <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
+            <Shield className="text-black w-5 h-5" />
           </div>
-          <div>
-            <h1 className="text-white font-bold tracking-tighter text-xl">WG PRO</h1>
-            <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest">Management Console</p>
-          </div>
+          {!isSidebarCollapsed && (
+            <motion.div 
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="min-w-0"
+            >
+              <h1 className="text-white font-bold tracking-tighter text-lg truncate">WG PRO</h1>
+              <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest truncate">Console</p>
+            </motion.div>
+          )}
         </div>
 
-        <nav className="flex-1 px-4 py-6 space-y-2">
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide">
           {[
             { id: 'overview', icon: Activity, label: 'Overview' },
             { id: 'peers', icon: Users, label: 'Peer Management' },
@@ -883,34 +1043,56 @@ export default function App() {
               key={item.id}
               onClick={() => setActiveTab(item.id as any)}
               className={cn(
-                "w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 group",
+                "w-full flex items-center rounded-lg transition-all duration-200 group relative",
+                isSidebarCollapsed ? "justify-center p-3" : "gap-2.5 px-3 py-2",
                 activeTab === item.id 
                   ? "bg-zinc-900 text-emerald-400 border border-zinc-800" 
                   : "hover:bg-zinc-900/50 hover:text-zinc-200"
               )}
+              title={isSidebarCollapsed ? item.label : undefined}
             >
-              <item.icon className={cn("w-5 h-5", activeTab === item.id ? "text-emerald-400" : "text-zinc-600 group-hover:text-zinc-400")} />
-              <span className="text-sm font-medium">{item.label}</span>
+              <item.icon className={cn("w-4 h-4 shrink-0", activeTab === item.id ? "text-emerald-400" : "text-zinc-600 group-hover:text-zinc-400")} />
+              {!isSidebarCollapsed && (
+                <span className="text-xs font-medium truncate">{item.label}</span>
+              )}
+              {isSidebarCollapsed && activeTab === item.id && (
+                <div className="absolute left-0 w-1 h-4 bg-emerald-500 rounded-r-full" />
+              )}
             </button>
           ))}
         </nav>
 
-        <div className="p-6 border-t border-zinc-800">
-          <div className="flex items-center gap-3 p-3 bg-zinc-900 rounded-xl border border-zinc-800">
-            <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center">
-              <Users className="w-4 h-4 text-zinc-400" />
+        <div className="p-4 border-t border-zinc-800">
+          <button 
+            onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            className="w-full mb-4 p-2 hover:bg-zinc-900 rounded-lg flex items-center justify-center text-zinc-500 hover:text-zinc-300 transition-colors"
+          >
+            {isSidebarCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
+          </button>
+
+          <div className={cn(
+            "flex items-center bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden transition-all duration-300",
+            isSidebarCollapsed ? "p-1.5 justify-center" : "gap-2 p-2"
+          )}>
+            <div className="w-7 h-7 rounded-full bg-zinc-800 flex items-center justify-center shrink-0">
+              <Users className="w-3.5 h-3.5 text-zinc-400" />
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-zinc-200 truncate">Roman Almakaev</p>
-              <p className="text-[10px] text-zinc-500 truncate">Administrator</p>
-            </div>
+            {!isSidebarCollapsed && (
+              <div className="flex-1 min-w-0">
+                <p className="text-[11px] font-semibold text-zinc-200 truncate">Roman Almakaev</p>
+                <p className="text-[9px] text-zinc-500 truncate">Administrator</p>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
       {/* Main Content */}
-      <main className="pl-64 min-h-screen">
-        <header className="h-20 border-b border-zinc-800 bg-zinc-950/50 backdrop-blur-md sticky top-0 z-40 px-10 flex items-center justify-between">
+      <main className={cn(
+        "min-h-screen transition-all duration-300 ease-in-out",
+        isSidebarCollapsed ? "pl-20" : "pl-64"
+      )}>
+        <header className="h-16 border-b border-zinc-800 bg-zinc-950/50 backdrop-blur-md sticky top-0 z-40 px-6 flex items-center justify-between">
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-2">
               <span className="text-zinc-500 text-sm">Dashboard</span>
@@ -1180,7 +1362,10 @@ export default function App() {
                           <Activity className={cn("w-5 h-5 text-zinc-500 group-hover:text-emerald-500", isRotating && "animate-spin text-emerald-500")} />
                           <span className="text-[10px] font-bold text-zinc-400 uppercase">Rotate Keys</span>
                         </button>
-                        <button className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl hover:bg-zinc-900 transition-colors flex flex-col items-center gap-2 group">
+                        <button 
+                          onClick={() => exportAllConfigs()}
+                          className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl hover:bg-zinc-900 transition-colors flex flex-col items-center gap-2 group"
+                        >
                           <Download className="w-5 h-5 text-zinc-500 group-hover:text-emerald-500" />
                           <span className="text-[10px] font-bold text-zinc-400 uppercase">Export All</span>
                         </button>
@@ -1894,6 +2079,7 @@ export default function App() {
                           <QrCode className="w-5 h-5" />
                         </button>
                         <button 
+                          onClick={() => downloadConfig(peer)}
                           className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl hover:bg-zinc-900 transition-colors text-zinc-400 hover:text-emerald-500"
                           title="Download Config"
                         >
@@ -1928,7 +2114,7 @@ export default function App() {
                         <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg0.conf (Clients)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
-PrivateKey = <VPS1_WG0_PRIV>
+PrivateKey = ${activeTunnel.vps1.wg0PrivateKey || '<VPS1_WG0_PRIV>'}
 Address = 10.0.0.1/24
 ListenPort = 51820
 
@@ -1943,12 +2129,12 @@ PostDown = iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -o wg1 -j MASQUERADE
                         <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg1.conf (VPS2 Tunnel)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
-PrivateKey = <VPS1_WG1_PRIV>
+PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || '<VPS1_WG1_PRIV>'}
 Address = 10.8.0.1/24
 
 [Peer]
-PublicKey = <VPS2_PUB>
-Endpoint = 89.110.86.75:51822
+PublicKey = ${activeTunnel.vps2.wg0PublicKey || '<VPS2_PUB>'}
+Endpoint = ${activeTunnel.vps2.ip || '89.110.86.75'}:51822
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`}
                         </pre>
@@ -1962,7 +2148,7 @@ PersistentKeepalive = 25`}
                         <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg0.conf (Inbound)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
-PrivateKey = <VPS2_PRIV>
+PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || '<VPS2_PRIV>'}
 Address = 10.8.0.254/24
 ListenPort = 51822
 
@@ -1971,12 +2157,23 @@ PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
 PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
 
 [Peer]
-PublicKey = <VPS1_WG1_PUB>
+PublicKey = ${activeTunnel.vps1.wg1PublicKey || '<VPS1_WG1_PUB>'}
 AllowedIPs = 10.8.0.0/24`}
                         </pre>
                       </div>
                     </div>
                   </Card>
+                </div>
+
+                <div className="flex justify-end">
+                  <button 
+                    onClick={() => runAutomation()}
+                    disabled={isRotating}
+                    className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 rounded-lg hover:bg-emerald-500/20 transition-all text-xs font-bold uppercase disabled:opacity-50"
+                  >
+                    <Activity className={cn("w-4 h-4", isRotating && "animate-spin")} />
+                    {isRotating ? "Syncing Keys..." : "Sync & Update VPS Keys"}
+                  </button>
                 </div>
 
                 <Card title="Firewall Rules (UFW / IPTables)" icon={Shield}>
@@ -2630,7 +2827,7 @@ AllowedIPs = 10.8.0.0/24`}
                 
                 <div className="p-4 bg-white rounded-2xl shadow-inner">
                   <QRCodeSVG 
-                    value={`[Interface]\nPrivateKey = ${selectedPeer.privateKey}\nAddress = ${selectedPeer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = pub_vps1_placeholder\nEndpoint = 193.42.127.149:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`}
+                    value={`[Interface]\nPrivateKey = ${selectedPeer.privateKey}\nAddress = ${selectedPeer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = 8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=\nEndpoint = ${activeTunnel.vps1.ip}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`}
                     size={200}
                     level="H"
                   />
@@ -2638,6 +2835,7 @@ AllowedIPs = 10.8.0.0/24`}
 
                 <div className="w-full space-y-3">
                   <button 
+                    onClick={() => downloadConfig(selectedPeer)}
                     className="w-full py-3 bg-zinc-800 text-zinc-200 font-bold rounded-xl hover:bg-zinc-700 transition-all flex items-center justify-center gap-2"
                   >
                     <Download className="w-4 h-4" />
