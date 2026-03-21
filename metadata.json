@@ -1,5 +1,5 @@
 {
-  "name": "WireGuard Automation Pro",
-  "description": "Fully automated WireGuard deployment for Ubuntu 24.04. Manage VPS-to-VPS tunnels, NAT, port forwarding, and user access via a professional web GUI.",
+  "name": "Double Tunnel",
+  "description": "Fully automated Double VPN WireGuard deployment for Ubuntu 24.04. Manage VPS-to-VPS tunnels, NAT, port forwarding, and user access via a professional web GUI.",
   "requestFramePermissions": []
 }

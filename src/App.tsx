@@ -32,7 +32,8 @@ import {
   Monitor,
   Smartphone,
   ExternalLink,
-  ArrowRightLeft
+  ArrowRightLeft,
+  Network
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -180,200 +181,6 @@ const INITIAL_PORT_RULES: PortForwardRule[] = [
 ];
 
 
-const INITIAL_SCRIPTS: Script[] = [
-  {
-    id: 'sync',
-    title: 'LodgeGuard Sync Script (lodgeguard-sync.sh)',
-    description: 'This script handles the automatic key rotation and exchange between VPS1 and VPS2. It is typically run via a daily cron job.',
-    icon: Lock,
-    content: `#!/bin/bash
-# LodgeGuard Automatic Key Rotation & Exchange Script
-# This script runs on VPS1 (Gateway) and communicates with VPS2 (Node)
-set -e
-
-# 1. Generate New Ephemeral Keys
-NEW_PRIV=$(wg genkey)
-NEW_PUB=$(echo "$NEW_PRIV" | wg pubkey)
-
-# 2. Exchange Keys with VPS2
-# We use the existing secure tunnel (10.8.0.254) to push the new public key
-echo "Sending new public key to VPS2..."
-ssh -i /root/.ssh/id_rsa root@10.8.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"
-
-# 3. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
-sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
-
-# 4. Trigger VPS2 to Rotate its own keys
-ssh -i /root/.ssh/id_rsa root@10.8.0.254 "/usr/local/bin/vps2-rotate.sh"
-
-# 5. Reload WireGuard
-systemctl restart wg-quick@wg1
-
-# 6. Log Rotation
-echo "Key rotation completed at $(date)" >> /var/log/lodgeguard-sync.log
-`
-  },
-  {
-    id: 'vps1-setup',
-    title: 'VPS1 (Gateway) - Double VPN Setup Script',
-    description: 'Installs WG-Easy for Clients and a secondary tunnel to VPS2. Routes all Client traffic through VPS2.',
-    icon: Terminal,
-    content: `#!/bin/bash
-# VPS1 Setup Script (Gateway) - IP: 193.42.127.149
-set -e
-
-echo "--- Starting VPS1 Double VPN Setup ---"
-export DEBIAN_FRONTEND=noninteractive
-
-# 1. Update & Install
-apt-get update && apt-get upgrade -y
-apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
-
-# 2. Enable IP Forwarding
-echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
-sysctl -p
-
-# 3. Setup WG-Easy (Client Gateway on wg0)
-mkdir -p /opt/wg-easy
-cat <<EOF > /opt/wg-easy/docker-compose.yml
-version: "3.8"
-services:
-  wg-easy:
-    environment:
-      - WG_HOST=193.42.127.149
-      - PASSWORD=admin123
-      - WG_DEFAULT_DNS=1.1.1.1
-      - WG_ALLOWED_IPS=0.0.0.0/0
-      - WG_PORT=51820
-    image: weejewel/wg-easy
-    container_name: wg-easy
-    volumes:
-      - .:/etc/wireguard
-    ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
-    restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv4.ip_forward=1
-EOF
-cd /opt/wg-easy && docker compose up -d
-
-# 4. Setup VPS-to-VPS Tunnel (wg1)
-# NOTE: You must paste the VPS2 Public Key here!
-cat <<EOF > /etc/wireguard/wg1.conf
-[Interface]
-PrivateKey = $(wg genkey | tee /etc/wireguard/vps1_tunnel_priv)
-Address = 10.8.0.1/24
-
-[Peer]
-PublicKey = <PASTE_VPS2_PUBLIC_KEY>
-Endpoint = 89.110.86.75:51822
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF
-systemctl enable wg-quick@wg1
-systemctl start wg-quick@wg1
-
-# 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
-# Route traffic from wg0 (Clients) out through wg1 (VPS2 Tunnel)
-iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o wg1 -j MASQUERADE
-iptables -A FORWARD -i wg0 -o wg1 -j ACCEPT
-iptables -A FORWARD -i wg1 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-# Ensure SSH remains accessible on physical interface
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-
-# Save rules
-apt-get install -y iptables-persistent
-netfilter-persistent save
-
-echo "--- VPS1 Double VPN Setup Complete ---"
-`,
-    rollbackContent: `#!/bin/bash
-# VPS1 Rollback Script
-echo "--- Initiating VPS1 Rollback ---"
-systemctl stop wg-quick@wg1 || true
-systemctl disable wg-quick@wg1 || true
-cd /opt/wg-easy && docker compose down || true
-rm -rf /opt/wg-easy
-rm -f /etc/wireguard/wg1.conf
-iptables -t nat -F
-iptables -F
-echo "--- VPS1 Rollback Complete ---"
-`
-  },
-  {
-    id: 'vps2-setup',
-    title: 'VPS2 (Exit Node) - Double VPN Setup Script',
-    description: 'Configures VPS2 as the final exit point for all traffic.',
-    icon: Terminal,
-    content: `#!/bin/bash
-# VPS2 Setup Script (Exit Node) - IP: 89.110.86.75
-set -e
-
-echo "--- Starting VPS2 Exit Node Setup ---"
-export DEBIAN_FRONTEND=noninteractive
-
-# 1. Update & Install
-apt-get update && apt-get upgrade -y
-apt-get install -y wireguard iptables curl
-
-# 2. Enable IP Forwarding
-echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
-sysctl -p
-
-# 3. Setup WireGuard (wg0)
-mkdir -p /etc/wireguard
-cd /etc/wireguard
-PRIV_KEY=$(wg genkey)
-PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
-echo "$PRIV_KEY" > privatekey
-echo "$PUB_KEY" > publickey
-
-cat <<EOF > /etc/wireguard/wg0.conf
-[Interface]
-PrivateKey = $PRIV_KEY
-Address = 10.8.0.254/24
-ListenPort = 51822
-
-[Peer]
-PublicKey = <PASTE_VPS1_WG1_PUBLIC_KEY>
-AllowedIPs = 10.8.0.0/24
-EOF
-
-# 4. EXIT NODE ROUTING (Tunnel -> Internet)
-iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
-iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
-iptables -A FORWARD -i eth0 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-# Save rules
-apt-get install -y iptables-persistent
-netfilter-persistent save
-
-# 5. Start Service
-systemctl enable wg-quick@wg0
-systemctl start wg-quick@wg0
-
-echo "--- VPS2 Exit Node Setup Complete ---"
-echo "Public Key: $PUB_KEY"
-`,
-    rollbackContent: `#!/bin/bash
-# VPS2 Rollback Script
-echo "--- Initiating VPS2 Rollback ---"
-systemctl stop wg-quick@wg0 || true
-systemctl disable wg-quick@wg0 || true
-rm -rf /etc/wireguard/wg0.conf
-iptables -t nat -F
-iptables -F
-echo "--- VPS2 Rollback Complete ---"
-`
-  }
-];
-
 // --- Components ---
 
 const Card = ({ children, className, title, icon: Icon }: { children: React.ReactNode, className?: string, title?: string, icon?: any, key?: React.Key }) => (
@@ -424,8 +231,8 @@ export default function App() {
     {
       id: 'tunnel-1',
       name: 'Primary Double VPN',
-      vps1: { ip: '193.42.127.149', user: 'root', password: '', sshKeyId: 'key-1' },
-      vps2: { ip: '89.110.86.75', user: 'root', password: '', sshKeyId: 'key-1' },
+      vps1: { ip: '', user: 'root', password: '', sshKeyId: 'key-1' },
+      vps2: { ip: '', user: 'root', password: '', sshKeyId: 'key-1' },
       status: 'idle',
       step: 0,
       logs: [],
@@ -436,6 +243,195 @@ export default function App() {
   const [activeTunnelId, setActiveTunnelId] = useState<string>('tunnel-1');
   
   const activeTunnel = tunnels.find(t => t.id === activeTunnelId) || tunnels[0];
+
+  const INITIAL_SCRIPTS: Script[] = [
+    {
+      id: 'sync',
+      title: 'LodgeGuard Sync Script (lodgeguard-sync.sh)',
+      description: 'This script handles the automatic key rotation and exchange between VPS1 and VPS2. It is typically run via a daily cron job.',
+      icon: Lock,
+      content: `#!/bin/bash
+# LodgeGuard Automatic Key Rotation & Exchange Script
+# This script runs on VPS1 (Gateway) and communicates with VPS2 (Node)
+set -e
+
+# 1. Generate New Ephemeral Keys
+NEW_PRIV=$(wg genkey)
+NEW_PUB=$(echo "$NEW_PRIV" | wg pubkey)
+
+# 2. Exchange Keys with VPS2
+# We use the existing secure tunnel (10.8.0.254) to push the new public key
+echo "Sending new public key to VPS2..."
+ssh -i /root/.ssh/id_rsa root@10.8.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"
+
+# 3. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
+sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
+
+# 4. Trigger VPS2 to Rotate its own keys
+ssh -i /root/.ssh/id_rsa root@10.8.0.254 "/usr/local/bin/vps2-rotate.sh"
+
+# 5. Reload WireGuard
+systemctl restart wg-quick@wg1
+
+# 6. Log Rotation
+echo "Key rotation completed at $(date)" >> /var/log/lodgeguard-sync.log
+`
+    },
+    {
+      id: 'vps1-setup',
+      title: 'VPS1 (Gateway) - Double VPN Setup Script',
+      description: 'Installs WG-Easy for Clients and a secondary tunnel to VPS2. Routes all Client traffic through VPS2.',
+      icon: Terminal,
+      content: `#!/bin/bash
+# VPS1 Setup Script (Gateway) - IP: ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+set -e
+
+echo "--- Starting VPS1 Double VPN Setup ---"
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Update & Install
+apt-get update && apt-get upgrade -y
+apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
+
+# 2. Enable IP Forwarding
+echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
+sysctl -p
+
+# 3. Setup WG-Easy (Client Gateway on wg0)
+mkdir -p /opt/wg-easy
+cat <<EOF > /opt/wg-easy/docker-compose.yml
+version: "3.8"
+services:
+  wg-easy:
+    environment:
+      - WG_HOST=${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+      - PASSWORD=admin123
+      - WG_DEFAULT_DNS=1.1.1.1
+      - WG_ALLOWED_IPS=0.0.0.0/0
+      - WG_PORT=51820
+    image: weejewel/wg-easy
+    container_name: wg-easy
+    volumes:
+      - .:/etc/wireguard
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv4.ip_forward=1
+EOF
+cd /opt/wg-easy && docker compose up -d
+
+# 4. Setup VPS-to-VPS Tunnel (wg1)
+# NOTE: You must paste the VPS2 Public Key here!
+cat <<EOF > /etc/wireguard/wg1.conf
+[Interface]
+PrivateKey = $(wg genkey | tee /etc/wireguard/vps1_tunnel_priv)
+Address = 10.8.0.1/24
+
+[Peer]
+PublicKey = <PASTE_VPS2_PUBLIC_KEY>
+Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51822
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+systemctl enable wg-quick@wg1
+systemctl start wg-quick@wg1
+
+# 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
+# Route traffic from wg0 (Clients) out through wg1 (VPS2 Tunnel)
+iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o wg1 -j MASQUERADE
+iptables -A FORWARD -i wg0 -o wg1 -j ACCEPT
+iptables -A FORWARD -i wg1 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Ensure SSH remains accessible on physical interface
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+# Save rules
+apt-get install -y iptables-persistent
+netfilter-persistent save
+
+echo "--- VPS1 Double VPN Setup Complete ---"
+`,
+      rollbackContent: `#!/bin/bash
+# VPS1 Rollback Script
+echo "--- Initiating VPS1 Rollback ---"
+systemctl stop wg-quick@wg1 || true
+systemctl disable wg-quick@wg1 || true
+cd /opt/wg-easy && docker compose down || true
+rm -rf /opt/wg-easy
+rm -f /etc/wireguard/wg1.conf
+iptables -t nat -F
+iptables -F
+echo "--- VPS1 Rollback Complete ---"
+`
+    },
+    {
+      id: 'vps2-setup',
+      title: 'VPS2 (Exit Node) - Double VPN Setup Script',
+      description: 'Configures VPS2 as the final exit point for all traffic.',
+      icon: Terminal,
+      content: `#!/bin/bash
+# VPS2 Setup Script (Exit Node) - IP: ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
+set -e
+
+echo "--- Starting VPS2 Exit Node Setup ---"
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. Update & Install
+apt-get update && apt-get upgrade -y
+apt-get install -y wireguard iptables curl
+
+# 2. Enable IP Forwarding
+echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
+sysctl -p
+
+# 3. Setup WireGuard (wg0)
+mkdir -p /etc/wireguard
+cd /etc/wireguard
+PRIV_KEY=$(wg genkey)
+PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
+echo "$PRIV_KEY" > privatekey
+echo "$PUB_KEY" > publickey
+
+cat <<EOF > /etc/wireguard/wg0.conf
+[Interface]
+PrivateKey = $PRIV_KEY
+Address = 10.8.0.254/24
+ListenPort = 51822
+
+[Peer]
+PublicKey = <PASTE_VPS1_WG1_PUBLIC_KEY>
+AllowedIPs = 10.8.0.0/24
+EOF
+
+# 4. EXIT NODE ROUTING (Tunnel -> Internet)
+iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
+iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
+iptables -A FORWARD -o wg0 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Save rules
+apt-get install -y iptables-persistent
+netfilter-persistent save
+
+echo "--- VPS2 Exit Node Setup Complete ---"
+`,
+      rollbackContent: `#!/bin/bash
+# VPS2 Rollback Script
+echo "--- Initiating VPS2 Rollback ---"
+systemctl stop wg-quick@wg0 || true
+systemctl disable wg-quick@wg0 || true
+rm -f /etc/wireguard/wg0.conf
+iptables -t nat -F
+iptables -F
+echo "--- VPS2 Rollback Complete ---"
+`
+    }
+  ];
 
   const VPS_DATA = [
     { 
@@ -752,7 +748,7 @@ export default function App() {
       "--- Initiating Secure Key Exchange ---",
       "[*] Generating new ephemeral keys on VPS1...",
       "[*] Encrypting public key with existing tunnel...",
-      `[*] Sending key to VPS2 (${activeTunnel.vps2.ip || '89.110.86.75'})...`,
+      `[*] Sending key to VPS2 (${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'})...`,
       "[+] VPS2 acknowledged. Rotating keys...",
       "[*] Updating wg0.conf on both nodes...",
       "[*] Restarting WireGuard services...",
@@ -1012,7 +1008,7 @@ PersistentKeepalive = 25`;
           isSidebarCollapsed ? "justify-center" : "gap-3"
         )}>
           <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
-            <Shield className="text-black w-5 h-5" />
+            <Network className="text-black w-5 h-5" />
           </div>
           {!isSidebarCollapsed && (
             <motion.div 
@@ -1020,7 +1016,7 @@ PersistentKeepalive = 25`;
               animate={{ opacity: 1, x: 0 }}
               className="min-w-0"
             >
-              <h1 className="text-white font-bold tracking-tighter text-lg truncate">WG PRO</h1>
+              <h1 className="text-white font-bold tracking-tighter text-lg truncate">Double Tunnel</h1>
               <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest truncate">Console</p>
             </motion.div>
           )}
@@ -1973,7 +1969,7 @@ PersistentKeepalive = 25`;
 |______|\\___/|_____/|______\\_____|\\____/_/     \\_\\_|  \\_\\_____/ 
                                                                `}
                           </pre>
-                          <p className="text-zinc-500">Last login: Sat Mar 21 18:45:12 2026 from 193.42.127.149</p>
+                          <p className="text-zinc-500">Last login: Sat Mar 21 18:45:12 2026 from ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}</p>
                           <p className="text-emerald-500 font-bold">root@vps1:~# <span className="text-zinc-100">apt update</span></p>
                           <p className="text-zinc-400">Hit:1 http://archive.ubuntu.com/ubuntu noble InRelease</p>
                           <p className="text-zinc-400">Hit:2 http://archive.ubuntu.com/ubuntu noble-updates InRelease</p>
@@ -2134,7 +2130,7 @@ Address = 10.8.0.1/24
 
 [Peer]
 PublicKey = ${activeTunnel.vps2.wg0PublicKey || '<VPS2_PUB>'}
-Endpoint = ${activeTunnel.vps2.ip || '89.110.86.75'}:51822
+Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51822
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`}
                         </pre>

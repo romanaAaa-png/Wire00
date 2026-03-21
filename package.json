@@ -1,10 +1,10 @@
 {
-  "name": "react-example",
+  "name": "double-tunnel",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "main": "electron/main.cjs",
-  "description": "WireGuard Automation Pro Management Console",
+  "description": "Double Tunnel Management Console",
   "author": "Roman Almakaev",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
@@ -14,7 +14,7 @@
     "lint": "tsc --noEmit",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron electron/main.cjs\"",
     "electron:build": "npm run build && electron-builder build --win",
-    "android:init": "cap init \"Double VPN Manager\" com.doublevpn.manager --web-dir dist",
+    "android:init": "cap init \"Double Tunnel\" com.doubletunnel.manager --web-dir dist",
     "android:add": "cap add android",
     "android:sync": "npm run build && cap sync android",
     "android:open": "cap open android"
@@ -53,8 +53,8 @@
     "wait-on": "^9.0.4"
   },
   "build": {
-    "appId": "com.doublevpn.manager",
-    "productName": "Double VPN Manager",
+    "appId": "com.doubletunnel.manager",
+    "productName": "Double Tunnel",
     "directories": {
       "output": "dist-electron"
     },
