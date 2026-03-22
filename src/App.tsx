@@ -3010,7 +3010,7 @@ AllowedIPs = 10.8.0.0/24`}
                     <div className="space-y-3">
                       <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                         <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
-                        <span className="text-xs text-blue-400 font-bold">v1.0.4-win</span>
+                        <span className="text-xs text-blue-400 font-bold">v1.1.0-win</span>
                       </div>
                       <button className="w-full py-2 bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center justify-center gap-2 hover:bg-blue-400 transition-colors">
                         <Download className="w-4 h-4" />
@@ -3029,6 +3029,10 @@ AllowedIPs = 10.8.0.0/24`}
                       Optimized for Samsung Galaxy devices. Includes Samsung Knox integration, quick-settings toggle, and S-Pen support for management.
                     </p>
                     <div className="space-y-3">
+                      <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
+                        <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
+                        <span className="text-xs text-orange-400 font-bold">v1.1.0-android</span>
+                      </div>
                       <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                         <span className="text-xs text-zinc-500 uppercase font-mono">Format</span>
                         <span className="text-xs text-orange-400 font-bold">APK / AAB</span>
