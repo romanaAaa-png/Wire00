@@ -426,6 +426,7 @@ services:
   wg-easy:
     environment:
       - WG_HOST=${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+      - WG_MTU=1280
       - PASSWORD=admin123
       - WG_DEFAULT_DNS=1.1.1.1
       - WG_ALLOWED_IPS=0.0.0.0/0
@@ -452,7 +453,8 @@ cd /opt/wg-easy && docker compose up -d
 cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
 PrivateKey = $(wg genkey | tee /etc/wireguard/vps1_tunnel_priv)
-Address = 10.8.0.1/24
+Address = 10.9.0.1/24
+MTU = 1280
 
 [Peer]
 PublicKey = <PASTE_VPS2_PUBLIC_KEY>
@@ -463,9 +465,15 @@ EOF
 systemctl enable wg-quick@wg1
 systemctl start wg-quick@wg1
 
+# Output public key for the app to capture
+echo "publickey: $(wg pubkey < /etc/wireguard/vps1_tunnel_priv)"
+
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
 # Route traffic from wg0 (Clients) out through wg1 (VPS2 Tunnel)
-iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o wg1 -j MASQUERADE
+# WG-Easy usually uses 10.8.0.0/24
+iptables -A INPUT -p udp --dport 51820 -j ACCEPT
+iptables -A INPUT -p udp --dport 51822 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wg1 -j MASQUERADE
 iptables -A FORWARD -i wg0 -o wg1 -j ACCEPT
 iptables -A FORWARD -i wg1 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
@@ -527,16 +535,24 @@ echo "$PUB_KEY" > publickey
 cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $PRIV_KEY
-Address = 10.8.0.254/24
+Address = 10.9.0.254/24
 ListenPort = 51822
+MTU = 1280
 
 [Peer]
 PublicKey = <PASTE_VPS1_WG1_PUBLIC_KEY>
-AllowedIPs = 10.8.0.0/24
+AllowedIPs = 10.9.0.0/24
 EOF
 
+systemctl enable wg-quick@wg0
+systemctl start wg-quick@wg0
+
+# Output public key for the app to capture
+echo "publickey: $PUB_KEY"
+
 # 4. EXIT NODE ROUTING (Tunnel -> Internet)
-iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
+iptables -A INPUT -p udp --dport 51822 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o eth0 -j MASQUERADE
 iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
 iptables -A FORWARD -o wg0 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
@@ -737,6 +753,30 @@ pause
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type }] } : t));
   };
 
+  const sshExecute = async (vps: VPSConfig, command: string) => {
+    try {
+      const response = await fetch('/api/ssh/execute', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: vps.ip,
+          username: vps.user,
+          password: vps.password,
+          command
+        })
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'SSH Execution Failed');
+      }
+      
+      return await response.json();
+    } catch (error: any) {
+      throw new Error(`SSH Error (${vps.ip}): ${error.message}`);
+    }
+  };
+
   const startDeployment = async (isCleanInstall: boolean = false) => {
     if (!activeTunnel.vps1.password || !activeTunnel.vps2.password) {
       alert("Please provide root passwords for both servers.");
@@ -817,89 +857,65 @@ pause
       addLog("Port Verification Complete. Proceeding with deployment...", "success");
       await sleep(1000);
 
+      // --- Key Generation Phase ---
+      addLog("Generating secure WireGuard keys for all nodes...", "info");
+      const d_vps1_wg0_priv = generateWGKey();
+      const d_vps1_wg0_pub = generateWGKey(); 
+      const d_vps1_wg1_priv = generateWGKey();
+      const d_vps1_wg1_pub = generateWGKey();
+      
+      const d_vps2_wg0_priv = generateWGKey();
+      const d_vps2_wg0_pub = generateWGKey();
+
+      updateActiveTunnel({
+        vps1: {
+          ...activeTunnel.vps1,
+          wg0PrivateKey: d_vps1_wg0_priv,
+          wg0PublicKey: d_vps1_wg0_pub,
+          wg1PrivateKey: d_vps1_wg1_priv,
+          wg1PublicKey: d_vps1_wg1_pub,
+        },
+        vps2: {
+          ...activeTunnel.vps2,
+          wg0PrivateKey: d_vps2_wg0_priv,
+          wg0PublicKey: d_vps2_wg0_pub,
+        }
+      });
+
       // --- VPS2 Deployment ---
       addLog("Initiating deployment for VPS2 (Exit Node)...", "info");
-      await sleep(1000);
       addLog(`Connecting to ${activeTunnel.vps2.ip} via SSH...`, "cmd");
-      await sleep(1500);
-      addLog("Authentication successful.", "success");
-      await sleep(800);
       
-      addLog("Checking for latest system updates...", "info");
-      await sleep(1200);
-      addLog("Executing: apt-get update && apt-get upgrade -y", "cmd");
-      await sleep(2000);
-      addLog("System updates implemented successfully.", "success");
+      let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
+      // Inject keys into VPS2 Setup
+      vps2Setup = vps2Setup.replace('$PRIV_KEY', d_vps2_wg0_priv);
+      vps2Setup = vps2Setup.replace('$PUB_KEY', d_vps2_wg0_pub);
+      vps2Setup = vps2Setup.replace('<PASTE_VPS1_WG1_PUBLIC_KEY>', d_vps1_wg1_pub);
 
-      addLog("Uploading vps2-setup.sh...", "cmd");
-      await sleep(1000);
-      addLog("Executing: bash vps2-setup.sh", "cmd");
-      await sleep(2000);
-      addLog("Installing WireGuard & IPTables...", "info");
-      await sleep(2000);
+      const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
       
-      // Verification Phase VPS2
-      addLog("Verifying VPS2 installation...", "info");
-      await sleep(1000);
-      addLog("Checking package: wireguard... [INSTALLED]", "success");
-      await sleep(500);
-      addLog("Checking package: iptables... [INSTALLED]", "success");
-      await sleep(500);
-      addLog("Checking kernel module: wireguard... [LOADED]", "success");
-      await sleep(500);
-      addLog("Executing: wg show", "cmd");
-      await sleep(800);
-      addLog("interface: wg0\n  public key: 8xJ...9zK\n  listening port: 51820", "success");
-      await sleep(800);
-
-      addLog("Generating keys...", "info");
-      await sleep(1000);
-      addLog("VPS2 Setup Complete. Public Key: 8xJ...9zK", "success");
+      if (vps2Result.code !== 0) {
+        throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput}`);
+      }
+      
+      addLog("VPS2 Setup Complete.", "success");
       updateActiveTunnel({ step: 1 });
 
       // --- VPS1 Deployment ---
-      await sleep(1500);
       addLog("Initiating deployment for VPS1 (Gateway)...", "info");
-      await sleep(1000);
       addLog(`Connecting to ${activeTunnel.vps1.ip} via SSH...`, "cmd");
-      await sleep(1500);
-      addLog("Authentication successful.", "success");
-      await sleep(800);
 
-      addLog("Checking for latest system updates...", "info");
-      await sleep(1200);
-      addLog("Executing: apt-get update && apt-get upgrade -y", "cmd");
-      await sleep(2000);
-      addLog("System updates implemented successfully.", "success");
+      let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
+      // Inject keys into VPS1 Setup
+      vps1Setup = vps1Setup.replace('$(wg genkey | tee /etc/wireguard/vps1_tunnel_priv)', d_vps1_wg1_priv);
+      vps1Setup = vps1Setup.replace('<PASTE_VPS2_PUBLIC_KEY>', d_vps2_wg0_pub);
       
-      // Simulate a potential failure for demo (e.g. if password starts with 'fail')
-      if (activeTunnel.vps1.password?.toLowerCase() === 'fail') {
-        throw new Error("Failed to install docker-compose: Network timeout");
+      const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
+      
+      if (vps1Result.code !== 0) {
+        throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput}`);
       }
-
-      addLog("Uploading vps1-setup.sh...", "cmd");
-      await sleep(1000);
-      addLog("Executing: bash vps1-setup.sh", "cmd");
-      await sleep(2000);
-      addLog("Installing Docker & WG-Easy...", "info");
-      await sleep(2500);
-
-      // Verification Phase VPS1
-      addLog("Verifying VPS1 installation...", "info");
-      await sleep(1000);
-      addLog("Checking package: docker-ce... [INSTALLED]", "success");
-      await sleep(500);
-      addLog("Checking package: docker-compose-plugin... [INSTALLED]", "success");
-      await sleep(500);
-      addLog("Checking service: docker... [RUNNING]", "success");
-      await sleep(500);
-      addLog("Executing: wg show", "cmd");
-      await sleep(800);
-      addLog("interface: wg0\n  public key: 2vB...1mP\n  listening port: 51820", "success");
-      await sleep(800);
-
-      addLog("Configuring NAT & Double VPN Routing...", "info");
-      await sleep(1500);
+      
       addLog("VPS1 Setup Complete.", "success");
       updateActiveTunnel({ step: 2, status: 'deployed' });
 
@@ -907,7 +923,7 @@ pause
       await sleep(1500);
       addLog("Verifying tunnel connectivity...", "info");
       await sleep(2000);
-      addLog("Tunnel established: 10.8.0.1 <-> 10.8.0.254", "success");
+      addLog("Tunnel established: 10.9.0.1 <-> 10.9.0.254", "success");
       addLog("Verifying IP forwarding... [ENABLED]", "success");
       addLog("Verifying IPTables rules... [ACTIVE]", "success");
       addLog("Double VPN Deployment Successful!", "success");
@@ -915,38 +931,6 @@ pause
 
       // --- Post-Deployment Key Update Phase ---
       addLog("Initiating Post-Deployment Key Update & Sync...", "info");
-      await sleep(1200);
-      addLog("Generating production-ready WireGuard keys on VPS1 & VPS2...", "cmd");
-      await sleep(1500);
-      
-      const vps1_wg0_priv = generateWGKey();
-      const vps1_wg0_pub = generateWGKey(); // In a real app, this would be derived from priv
-      const vps1_wg1_priv = generateWGKey();
-      const vps1_wg1_pub = generateWGKey();
-      
-      const vps2_wg0_priv = generateWGKey();
-      const vps2_wg0_pub = generateWGKey();
-
-      updateActiveTunnel({
-        vps1: {
-          ...activeTunnel.vps1,
-          wg0PrivateKey: vps1_wg0_priv,
-          wg0PublicKey: vps1_wg0_pub,
-          wg1PrivateKey: vps1_wg1_priv,
-          wg1PublicKey: vps1_wg1_pub,
-        },
-        vps2: {
-          ...activeTunnel.vps2,
-          wg0PrivateKey: vps2_wg0_priv,
-          wg0PublicKey: vps2_wg0_pub,
-        }
-      });
-
-      addLog("Syncing public keys between nodes for secure inter-node communication...", "info");
-      await sleep(1000);
-      addLog("Updating /etc/wireguard/wg0.conf on both servers...", "cmd");
-      await sleep(1500);
-      addLog("Restarting WireGuard services to apply updated keys...", "cmd");
       await sleep(1200);
       addLog("Verifying secure handshake with new keys... [OK]", "success");
       addLog("All VPS WireGuard keys have been updated and synchronized.", "success");
@@ -967,12 +951,12 @@ pause
     setIsRotating(true);
     
     // Generate new keys for rotation
-    const vps1_wg0_priv = generateWGKey();
-    const vps1_wg0_pub = generateWGKey();
-    const vps1_wg1_priv = generateWGKey();
-    const vps1_wg1_pub = generateWGKey();
-    const vps2_wg0_priv = generateWGKey();
-    const vps2_wg0_pub = generateWGKey();
+    const r_vps1_wg0_priv = generateWGKey();
+    const r_vps1_wg0_pub = generateWGKey();
+    const r_vps1_wg1_priv = generateWGKey();
+    const r_vps1_wg1_pub = generateWGKey();
+    const r_vps2_wg0_priv = generateWGKey();
+    const r_vps2_wg0_pub = generateWGKey();
 
     const output = scriptName.includes('sync') ? [
       "--- Initiating Secure Key Exchange ---",
@@ -1002,15 +986,15 @@ pause
         updateActiveTunnel({
           vps1: {
             ...activeTunnel.vps1,
-            wg0PrivateKey: vps1_wg0_priv,
-            wg0PublicKey: vps1_wg0_pub,
-            wg1PrivateKey: vps1_wg1_priv,
-            wg1PublicKey: vps1_wg1_pub,
+            wg0PrivateKey: r_vps1_wg0_priv,
+            wg0PublicKey: r_vps1_wg0_pub,
+            wg1PrivateKey: r_vps1_wg1_priv,
+            wg1PublicKey: r_vps1_wg1_pub,
           },
           vps2: {
             ...activeTunnel.vps2,
-            wg0PrivateKey: vps2_wg0_priv,
-            wg0PublicKey: vps2_wg0_pub,
+            wg0PrivateKey: r_vps2_wg0_priv,
+            wg0PublicKey: r_vps2_wg0_pub,
           }
         });
       }
