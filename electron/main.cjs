@@ -1,5 +1,6 @@
-const { app, BrowserWindow, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { Client } = require('ssh2');
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -76,6 +77,27 @@ app.whenReady().then(() => {
         readyTimeout: 30000,
       });
     });
+  });
+
+  ipcMain.handle('read-file', async (event, filePath) => {
+    try {
+      if (!fs.existsSync(filePath)) {
+        return { error: 'File not found' };
+      }
+      const data = fs.readFileSync(filePath, 'utf8');
+      return { data };
+    } catch (err) {
+      return { error: err.message };
+    }
+  });
+
+  ipcMain.handle('select-file', async () => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'Configuration Files', extensions: ['ini', 'txt'] }]
+    });
+    if (result.canceled) return null;
+    return result.filePaths[0];
   });
 
   createWindow();

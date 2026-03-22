@@ -53,6 +53,8 @@ declare global {
       sshExecute: (config: any) => Promise<any>;
       send: (channel: string, data: any) => void;
       receive: (channel: string, func: (...args: any[]) => void) => void;
+      readFile: (filePath: string) => Promise<{ data?: string; error?: string }>;
+      selectFile: () => Promise<string | null>;
     };
   }
 }
@@ -480,6 +482,12 @@ trap collect_debug_info EXIT
 
 log_step "--- Starting VPS1 Double VPN Setup ---"
 export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
+# Disable needrestart prompts globally for this session
+if [ -f /etc/needrestart/needrestart.conf ]; then
+  sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf || true
+fi
 
 wait_for_service() {
   local service=$1
@@ -500,15 +508,23 @@ wait_for_service() {
 
 # 1. Update & Install
 log_step "Updating system packages..."
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
 apt-get update
 
 log_step "Installing WireGuard, Docker, and networking tools..."
-apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
+# Remove any potential snap docker to avoid conflicts
+if command -v snap &> /dev/null; then
+  snap remove docker || true
+fi
+
+# Install with non-interactive flags
+apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+  wireguard iptables docker.io docker-compose-v2 curl
 
 log_step "Starting Docker daemon..."
-systemctl enable --now docker
+systemctl unmask docker.service || true
+systemctl unmask docker.socket || true
+systemctl enable docker || true
+systemctl start docker || true
 wait_for_service "docker"
 
 # Stop and remove previous versions
@@ -938,6 +954,9 @@ docker rm wg-easy || true
 
 # 2. Purge packages
 export DEBIAN_FRONTEND=noninteractive
+if command -v snap &> /dev/null; then
+  snap remove docker || true
+fi
 apt-get purge -y wireguard wireguard-tools docker.io docker-compose-v2 iptables-persistent
 apt-get autoremove -y
 apt-get clean
@@ -1095,6 +1114,57 @@ pause
     clientNames: 'Client1, Client2, Client3, Client4, Client5',
     setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
   });
+
+  const loadSetupIni = async () => {
+    if (!window.electron || !window.electron.readFile) {
+      alert("This feature is only available in the Desktop version.");
+      return;
+    }
+
+    try {
+      const result = await window.electron.readFile(preSetupConfig.setupIniPath);
+      if (result.error) {
+        alert(`Error reading file: ${result.error}`);
+        return;
+      }
+
+      if (result.data) {
+        const lines = result.data.split('\n');
+        const newConfig = { ...preSetupConfig };
+        
+        lines.forEach(line => {
+          const [key, value] = line.split('=').map(s => s.trim());
+          if (!key || !value) return;
+
+          switch (key.toLowerCase()) {
+            case 'vps1_ip': newConfig.vps1Ip = value; break;
+            case 'vps1_password': newConfig.vps1Password = value; break;
+            case 'vps2_ip': newConfig.vps2Ip = value; break;
+            case 'vps2_password': newConfig.vps2Password = value; break;
+            case 'client_count': newConfig.clientCount = parseInt(value) || 5; break;
+            case 'client_names': newConfig.clientNames = value; break;
+          }
+        });
+
+        setPreSetupConfig(newConfig);
+        alert("Configuration loaded successfully from setup.ini");
+      }
+    } catch (err: any) {
+      alert(`Failed to load setup.ini: ${err.message}`);
+    }
+  };
+
+  const selectSetupIni = async () => {
+    if (!window.electron || !window.electron.selectFile) {
+      alert("This feature is only available in the Desktop version.");
+      return;
+    }
+
+    const filePath = await window.electron.selectFile();
+    if (filePath) {
+      setPreSetupConfig({ ...preSetupConfig, setupIniPath: filePath });
+    }
+  };
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [isRotating, setIsRotating] = useState(false);
@@ -2123,10 +2193,19 @@ PersistentKeepalive = 25`;
                               placeholder="C:\Path\To\setup.ini"
                             />
                             <button 
-                              onClick={() => alert("In the desktop version, this opens a file picker. For now, please enter the path manually.")}
+                              onClick={selectSetupIni}
                               className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-400 hover:text-zinc-200 transition-colors"
+                              title="Select setup.ini file"
                             >
                               <FolderOpen className="w-4 h-4" />
+                            </button>
+                            <button 
+                              onClick={loadSetupIni}
+                              className="px-3 py-2 bg-emerald-600 border border-emerald-500 rounded-lg text-white hover:bg-emerald-500 transition-colors flex items-center gap-2"
+                              title="Load configuration from file"
+                            >
+                              <Download className="w-4 h-4" />
+                              <span className="text-[10px] font-bold uppercase">Load</span>
                             </button>
                           </div>
                           <p className="text-[8px] text-zinc-600 italic">The deployment tool will look for its configuration at this location.</p>

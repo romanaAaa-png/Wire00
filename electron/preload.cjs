@@ -13,5 +13,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on(channel, (event, ...args) => func(...args));
     }
   },
-  sshExecute: (config) => ipcRenderer.invoke('ssh-execute', config)
+  sshExecute: (config) => ipcRenderer.invoke('ssh-execute', config),
+  readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
+  selectFile: () => ipcRenderer.invoke('select-file')
 });
