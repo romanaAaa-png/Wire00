@@ -227,7 +227,7 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics' | 'uninstall'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   
@@ -1596,6 +1596,7 @@ PersistentKeepalive = 25`;
             { id: 'setup', icon: Globe, label: 'Setup Guide' },
             { id: 'platforms', icon: Monitor, label: 'Cross-Platform' },
             { id: 'diagnostics', icon: ShieldAlert, label: 'Troubleshooting' },
+            { id: 'uninstall', icon: Trash2, label: 'Uninstall & Reset' },
           ].map((item) => (
             <button
               key={item.id}
@@ -3040,45 +3041,22 @@ AllowedIPs = 10.8.0.0/24`}
                   </div>
                 </div>
 
-                <div className="bg-red-500/5 rounded-2xl border border-red-500/20 p-8">
+                <div className="bg-zinc-900/30 rounded-2xl border border-zinc-800 p-8">
                   <div className="flex items-start gap-4">
-                    <div className="p-3 bg-red-500/10 rounded-xl">
-                      <Trash2 className="w-6 h-6 text-red-500" />
+                    <div className="p-3 bg-zinc-800 rounded-xl">
+                      <Trash2 className="w-6 h-6 text-zinc-400" />
                     </div>
-                    <div>
-                      <h4 className="text-white font-bold mb-2">System Reset & Cleanup</h4>
+                    <div className="flex-1">
+                      <h4 className="text-white font-bold mb-2">Maintenance & Uninstallation</h4>
                       <p className="text-zinc-500 text-sm mb-6 max-w-2xl">
-                        Completely remove all traces of Double Tunnel from your local PC and remote servers. This will restore all systems to their previous state.
+                        Need to remove Double Tunnel or reset your servers? Access the dedicated maintenance tools to safely uninstall all components.
                       </p>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <button 
-                          onClick={downloadCleanupTool}
-                          className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 hover:border-red-500/50 transition-all text-left group"
-                        >
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-[10px] text-zinc-500 uppercase font-mono">Local PC Cleanup</p>
-                            <Download className="w-3 h-3 text-zinc-600 group-hover:text-red-500" />
-                          </div>
-                          <p className="text-xs text-zinc-300 font-bold mb-1">Download cleanup.bat</p>
-                          <p className="text-[10px] text-zinc-600">Removes Windows registry keys, .ini files, and WireGuard remnants.</p>
-                        </button>
-                        <button 
-                          onClick={() => {
-                            if(confirm("This will clear all local application data and reset the console. Continue?")) {
-                              localStorage.clear();
-                              window.location.reload();
-                            }
-                          }}
-                          className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 hover:border-red-500/50 transition-all text-left group"
-                        >
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-[10px] text-zinc-500 uppercase font-mono">Console Reset</p>
-                            <RotateCcw className="w-3 h-3 text-zinc-600 group-hover:text-red-500" />
-                          </div>
-                          <p className="text-xs text-zinc-300 font-bold mb-1">Reset App State</p>
-                          <p className="text-[10px] text-zinc-600">Clears browser cache, saved passwords, and deployment logs.</p>
-                        </button>
-                      </div>
+                      <button 
+                        onClick={() => setActiveTab('uninstall')}
+                        className="px-6 py-2 bg-emerald-500 text-black rounded-lg text-xs font-bold hover:bg-emerald-400 transition-all"
+                      >
+                        OPEN UNINSTALL WIZARD
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -3103,6 +3081,107 @@ AllowedIPs = 10.8.0.0/24`}
                           <code className="text-xs text-orange-400">npm run android:sync</code>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'uninstall' && (
+              <motion.div
+                key="uninstall"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="max-w-4xl mx-auto space-y-8"
+              >
+                <div className="text-center space-y-4 mb-12">
+                  <div className="w-16 h-16 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                    <Trash2 className="text-red-500 w-8 h-8" />
+                  </div>
+                  <h2 className="text-3xl font-bold text-white tracking-tight">Uninstall & Maintenance</h2>
+                  <p className="text-zinc-500 max-w-xl mx-auto">
+                    Completely remove Double Tunnel from your local machine and remote servers.
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Local Uninstallation */}
+                  <Card title="Local Windows Uninstallation" icon={Monitor}>
+                    <div className="space-y-4">
+                      <p className="text-sm text-zinc-400">
+                        To uninstall the desktop application, use the standard Windows "Add or Remove Programs" utility.
+                      </p>
+                      <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-3">
+                        <div className="flex items-center gap-3 text-xs text-zinc-300">
+                          <div className="w-6 h-6 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-500">1</div>
+                          <span>Open <b>Settings &gt; Apps &gt; Installed Apps</b></span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-zinc-300">
+                          <div className="w-6 h-6 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-500">2</div>
+                          <span>Search for <b>"Double Tunnel"</b></span>
+                        </div>
+                        <div className="flex items-center gap-3 text-xs text-zinc-300">
+                          <div className="w-6 h-6 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-500">3</div>
+                          <span>Click <b>Uninstall</b></span>
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-zinc-600 italic">
+                        Default Path: C:\Program Files\Double Tunnel
+                      </p>
+                      <button 
+                        onClick={downloadCleanupTool}
+                        className="w-full py-3 bg-zinc-900 text-zinc-300 border border-zinc-800 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-500 transition-all"
+                      >
+                        <Download className="w-4 h-4" />
+                        DOWNLOAD CLEANUP.BAT (FORCE REMOVE)
+                      </button>
+                    </div>
+                  </Card>
+
+                  {/* Remote Server Reset */}
+                  <Card title="Remote Server Reset" icon={Server}>
+                    <div className="space-y-4">
+                      <p className="text-sm text-zinc-400">
+                        Remove all WireGuard configurations, firewall rules, and management scripts from your VPS instances.
+                      </p>
+                      <div className="space-y-2">
+                        <button 
+                          onClick={() => runAutomation('reset')}
+                          className="w-full py-3 bg-red-500/10 text-red-500 border border-red-500/20 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-red-500/20 transition-all"
+                        >
+                          <RotateCcw className="w-4 h-4" />
+                          FULL VPS RESET (VPS1 & VPS2)
+                        </button>
+                        <p className="text-[10px] text-zinc-600 text-center italic">
+                          This will permanently delete all tunnel data on the servers.
+                        </p>
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+
+                <div className="bg-zinc-900/30 rounded-2xl border border-zinc-800 p-8">
+                  <div className="flex items-start gap-4">
+                    <div className="p-3 bg-zinc-800 rounded-xl">
+                      <RotateCcw className="w-6 h-6 text-zinc-400" />
+                    </div>
+                    <div>
+                      <h4 className="text-white font-bold mb-2">Console Reset</h4>
+                      <p className="text-zinc-500 text-sm mb-6 max-w-2xl">
+                        If the management interface is behaving unexpectedly, you can reset the local cache. This will not affect your VPS servers.
+                      </p>
+                      <button 
+                        onClick={() => {
+                          if(confirm("This will clear all local application data and reset the console. Continue?")) {
+                            localStorage.clear();
+                            window.location.reload();
+                          }
+                        }}
+                        className="px-6 py-2 bg-zinc-950 border border-zinc-800 rounded-lg text-xs font-bold text-zinc-400 hover:text-white hover:border-zinc-600 transition-all"
+                      >
+                        RESET LOCAL CONSOLE DATA
+                      </button>
                     </div>
                   </div>
                 </div>

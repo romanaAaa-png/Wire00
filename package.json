@@ -56,7 +56,7 @@
   },
   "build": {
     "appId": "com.doubletunnel.manager",
-    "productName": "Double Tunnel VPN",
+    "productName": "Double Tunnel",
     "directories": {
       "output": "dist-electron"
     },
@@ -71,8 +71,14 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": false,
+      "perMachine": true,
+      "allowElevation": true,
       "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Double Tunnel",
+      "uninstallDisplayName": "Uninstall Double Tunnel",
+      "deleteAppDataOnUninstall": true,
       "artifactName": "${productName} Setup ${version}.${ext}"
     }
   }
