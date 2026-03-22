@@ -458,8 +458,44 @@ log_step() {
   echo "$1"
 }
 
+collect_debug_info() {
+  log_step "Collecting system debug information..."
+  journalctl -n 200 > "$LOG_DIR/system_journal.log"
+  dmesg | tail -n 100 > "$LOG_DIR/dmesg.log"
+  iptables -S > "$LOG_DIR/iptables_filter.log"
+  iptables -t nat -S > "$LOG_DIR/iptables_nat.log"
+  ip addr > "$LOG_DIR/ip_addr.log"
+  ip route > "$LOG_DIR/ip_route.log"
+  if command -v wg &> /dev/null; then
+    wg show > "$LOG_DIR/wireguard_status.log"
+  fi
+  if command -v docker &> /dev/null; then
+    docker ps -a > "$LOG_DIR/docker_containers.log"
+    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.log" || true
+  fi
+  log_step "Debug information collected in $LOG_DIR"
+}
+trap collect_debug_info EXIT
+
 log_step "--- Starting VPS1 Double VPN Setup ---"
 export DEBIAN_FRONTEND=noninteractive
+
+wait_for_service() {
+  local service=$1
+  local max_attempts=10
+  local attempt=1
+  log_step "Waiting for $service to be active..."
+  while ! systemctl is-active --quiet "$service"; do
+    if [ $attempt -ge $max_attempts ]; then
+      log_step "ERROR: $service failed to start after $max_attempts attempts."
+      exit 1
+    fi
+    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
+    sleep 3
+    attempt=$((attempt + 1))
+  done
+  log_step "$service is now active."
+}
 
 # 1. Update & Install
 log_step "Updating system packages..."
@@ -467,6 +503,10 @@ apt-get update && apt-get upgrade -y
 
 log_step "Installing WireGuard, Docker, and networking tools..."
 apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
+
+log_step "Starting Docker daemon..."
+systemctl enable --now docker
+wait_for_service "docker"
 
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
@@ -512,6 +552,11 @@ services:
       - net.ipv4.ip_forward=1
 EOF
 cd /opt/wg-easy && docker compose up -d
+log_step "Verifying WG-Easy container status..."
+if ! docker ps | grep -q wg-easy; then
+  log_step "ERROR: wg-easy container failed to start."
+  exit 1
+fi
 
 # 4. Setup VPS-to-VPS Tunnel (wg1)
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
@@ -530,6 +575,7 @@ PersistentKeepalive = 25
 EOF
 systemctl enable wg-quick@wg1
 systemctl start wg-quick@wg1
+wait_for_service "wg-quick@wg1"
 
 # Output public key for the app to capture
 log_step "Capturing public key..."
@@ -614,8 +660,44 @@ log_step() {
   echo "$1"
 }
 
+collect_debug_info() {
+  log_step "Collecting system debug information..."
+  journalctl -n 200 > "$LOG_DIR/system_journal.log"
+  dmesg | tail -n 100 > "$LOG_DIR/dmesg.log"
+  iptables -S > "$LOG_DIR/iptables_filter.log"
+  iptables -t nat -S > "$LOG_DIR/iptables_nat.log"
+  ip addr > "$LOG_DIR/ip_addr.log"
+  ip route > "$LOG_DIR/ip_route.log"
+  if command -v wg &> /dev/null; then
+    wg show > "$LOG_DIR/wireguard_status.log"
+  fi
+  if command -v docker &> /dev/null; then
+    docker ps -a > "$LOG_DIR/docker_containers.log"
+    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.log" || true
+  fi
+  log_step "Debug information collected in $LOG_DIR"
+}
+trap collect_debug_info EXIT
+
 log_step "--- Starting VPS2 Exit Node Setup ---"
 export DEBIAN_FRONTEND=noninteractive
+
+wait_for_service() {
+  local service=$1
+  local max_attempts=10
+  local attempt=1
+  log_step "Waiting for $service to be active..."
+  while ! systemctl is-active --quiet "$service"; do
+    if [ $attempt -ge $max_attempts ]; then
+      log_step "ERROR: $service failed to start after $max_attempts attempts."
+      exit 1
+    fi
+    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
+    sleep 3
+    attempt=$((attempt + 1))
+  done
+  log_step "$service is now active."
+}
 
 # 1. Update & Install
 log_step "Updating system packages..."
@@ -658,6 +740,7 @@ EOF
 
 systemctl enable wg-quick@wg0
 systemctl start wg-quick@wg0
+wait_for_service "wg-quick@wg0"
 
 # Output public key for the app to capture
 log_step "Capturing public key..."
@@ -1702,8 +1785,8 @@ PersistentKeepalive = 25`;
           "p-5 flex items-center transition-all duration-300",
           isSidebarCollapsed ? "justify-center" : "gap-3"
         )}>
-          <div className="w-8 h-8 bg-emerald-500 rounded-lg flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
-            <Network className="text-black w-5 h-5" />
+          <div className="w-10 h-10 bg-emerald-500 rounded-xl flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
+            <Binoculars className="text-black w-6 h-6" />
           </div>
           {!isSidebarCollapsed && (
             <motion.div 
@@ -1711,13 +1794,8 @@ PersistentKeepalive = 25`;
               animate={{ opacity: 1, x: 0 }}
               className="min-w-0"
             >
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 bg-emerald-500/20 border border-emerald-500/30 rounded-lg flex items-center justify-center">
-                  <Binoculars className="w-5 h-5 text-emerald-500" />
-                </div>
-                <h1 className="text-white font-bold tracking-tighter text-lg truncate">Double Tunnel VPN</h1>
-              </div>
-              <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest truncate">Console</p>
+              <h1 className="text-white font-bold tracking-tighter text-lg truncate">Double Tunnel</h1>
+              <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest truncate">VPN Console</p>
             </motion.div>
           )}
         </div>
