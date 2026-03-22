@@ -870,8 +870,8 @@ Address = ${peer.allowedIPs}
 DNS = 1.1.1.1
 
 [Peer]
-PublicKey = 8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=
-Endpoint = ${activeTunnel.vps1.ip}:51820
+PublicKey = ${activeTunnel.vps1.wg0PublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}
+Endpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`;
 
@@ -888,7 +888,7 @@ PersistentKeepalive = 25`;
 
   const exportAllConfigs = () => {
     const allConfigs = activeTunnel.peers.map(peer => {
-      return `--- ${peer.name} ---\n[Interface]\nPrivateKey = ${peer.privateKey}\nAddress = ${peer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = 8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=\nEndpoint = ${activeTunnel.vps1.ip}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n\n`;
+      return `--- ${peer.name} ---\n[Interface]\nPrivateKey = ${peer.privateKey}\nAddress = ${peer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = ${activeTunnel.vps1.wg0PublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}\nEndpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n\n`;
     }).join('\n');
 
     const blob = new Blob([allConfigs], { type: 'text/plain' });
@@ -1022,7 +1022,7 @@ PersistentKeepalive = 25`;
           )}
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-hide">
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
           {[
             { id: 'overview', icon: Activity, label: 'Overview' },
             { id: 'peers', icon: Users, label: 'Peer Management' },
@@ -2823,7 +2823,7 @@ AllowedIPs = 10.8.0.0/24`}
                 
                 <div className="p-4 bg-white rounded-2xl shadow-inner">
                   <QRCodeSVG 
-                    value={`[Interface]\nPrivateKey = ${selectedPeer.privateKey}\nAddress = ${selectedPeer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = 8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=\nEndpoint = ${activeTunnel.vps1.ip}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`}
+                    value={`[Interface]\nPrivateKey = ${selectedPeer.privateKey}\nAddress = ${selectedPeer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = ${activeTunnel.vps1.wg0PublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}\nEndpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`}
                     size={200}
                     level="H"
                   />
