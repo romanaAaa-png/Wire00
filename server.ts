@@ -9,8 +9,14 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Health Check
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok" });
+  });
+
   // SSH Execution Endpoint
   app.post("/api/ssh/execute", (req, res) => {
+    console.log(`SSH Request for host: ${req.body.host}`);
     const { host, port, username, password, privateKey, command } = req.body;
 
     if (!host || !username || (!password && !privateKey)) {
@@ -20,17 +26,28 @@ async function startServer() {
     const conn = new Client();
     let output = "";
     let errorOutput = "";
+    let hasResponded = false;
+
+    const sendResponse = (status: number, data: any) => {
+      if (!hasResponded) {
+        hasResponded = true;
+        res.status(status).json(data);
+      }
+    };
 
     conn.on("ready", () => {
+      console.log(`SSH Connection ready for ${host}`);
       conn.exec(command, (err, stream) => {
         if (err) {
+          console.error(`SSH Exec Error for ${host}: ${err.message}`);
           conn.end();
-          return res.status(500).json({ error: err.message });
+          return sendResponse(500, { error: err.message });
         }
         stream
-          .on("close", (code, signal) => {
+          .on("close", (code: number, signal: string) => {
+            console.log(`SSH Stream closed for ${host} with code ${code}`);
             conn.end();
-            res.json({ output, errorOutput, code, signal });
+            sendResponse(200, { output, errorOutput, code, signal });
           })
           .on("data", (data: Buffer) => {
             output += data.toString();
@@ -40,14 +57,15 @@ async function startServer() {
           });
       });
     }).on("error", (err) => {
-      res.status(500).json({ error: err.message });
+      console.error(`SSH Connection Error for ${host}: ${err.message}`);
+      sendResponse(500, { error: err.message });
     }).connect({
       host,
       port: port || 22,
       username,
       password,
       privateKey,
-      readyTimeout: 20000,
+      readyTimeout: 30000,
     });
   });
 

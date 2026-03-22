@@ -14,6 +14,7 @@ import {
   Check, 
   Terminal, 
   Activity,
+  Binoculars,
   Globe,
   Lock,
   Cpu,
@@ -217,6 +218,23 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
+  
+  useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok) {
+          setBackendStatus('online');
+        } else {
+          setBackendStatus('offline');
+        }
+      } catch (err) {
+        setBackendStatus('offline');
+      }
+    };
+    checkBackend();
+  }, []);
   const [consoleLogs, setConsoleLogs] = useState<{type: string, message: string, timestamp: string}[]>([]);
   const [vpsLogs, setVpsLogs] = useState<{vps: string, logs: string}[]>([]);
   const [terminalInput, setTerminalInput] = useState('');
@@ -395,30 +413,48 @@ echo "Key rotation completed at $(date)" >> /var/log/lodgeguard-sync.log
       id: 'vps1-setup',
       title: 'VPS1 (Gateway) - Double VPN Setup Script',
       description: 'Installs WG-Easy for Clients and a secondary tunnel to VPS2. Routes all Client traffic through VPS2.',
-      icon: Terminal,
+      icon: Binoculars,
       content: `#!/bin/bash
 # VPS1 Setup Script (Gateway) - IP: ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
 set -e
 
-echo "--- Starting VPS1 Double VPN Setup ---"
+# Logging setup
+LOG_DIR="/root/VPS Installation Log"
+LOG_FILE="$LOG_DIR/installation_steps.txt"
+mkdir -p "$LOG_DIR"
+echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
+echo "Started at: $(date)" >> "$LOG_FILE"
+
+log_step() {
+  echo "[$(date)] $1" >> "$LOG_FILE"
+  echo "$1"
+}
+
+log_step "--- Starting VPS1 Double VPN Setup ---"
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. Update & Install
+log_step "Updating system packages..."
 apt-get update && apt-get upgrade -y
+
 # Stop and remove previous versions
-echo "Cleaning up previous installations..."
+log_step "Cleaning up previous installations..."
 systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
 systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
 docker stop wg-easy || true
 docker rm wg-easy || true
 rm -rf /etc/wireguard /opt/wg-easy
+
+log_step "Installing WireGuard, Docker, and networking tools..."
 apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
 
 # 2. Enable IP Forwarding
+log_step "Enabling IP Forwarding..."
 echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
 sysctl -p
 
 # 3. Setup WG-Easy (Client Gateway on wg0)
+log_step "Configuring WG-Easy (Client Gateway)..."
 mkdir -p /opt/wg-easy
 cat <<EOF > /opt/wg-easy/docker-compose.yml
 version: "3.8"
@@ -449,15 +485,15 @@ EOF
 cd /opt/wg-easy && docker compose up -d
 
 # 4. Setup VPS-to-VPS Tunnel (wg1)
-# NOTE: You must paste the VPS2 Public Key here!
+log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
 cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
-PrivateKey = $(wg genkey | tee /etc/wireguard/vps1_tunnel_priv)
+PrivateKey = __VPS1_WG1_PRIV_KEY__
 Address = 10.9.0.1/24
 MTU = 1280
 
 [Peer]
-PublicKey = <PASTE_VPS2_PUBLIC_KEY>
+PublicKey = __VPS2_WG0_PUB_KEY__
 Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51822
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
@@ -466,11 +502,11 @@ systemctl enable wg-quick@wg1
 systemctl start wg-quick@wg1
 
 # Output public key for the app to capture
+log_step "Capturing public key..."
 echo "publickey: $(wg pubkey < /etc/wireguard/vps1_tunnel_priv)"
 
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
-# Route traffic from wg0 (Clients) out through wg1 (VPS2 Tunnel)
-# WG-Easy usually uses 10.8.0.0/24
+log_step "Configuring IPTables routing rules..."
 iptables -A INPUT -p udp --dport 51820 -j ACCEPT
 iptables -A INPUT -p udp --dport 51822 -j ACCEPT
 iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wg1 -j MASQUERADE
@@ -481,10 +517,11 @@ iptables -A FORWARD -i wg1 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
 # Save rules
+log_step "Saving IPTables rules permanently..."
 apt-get install -y iptables-persistent
 netfilter-persistent save
 
-echo "--- VPS1 Double VPN Setup Complete ---"
+log_step "--- VPS1 Double VPN Setup Complete ---"
 `,
       rollbackContent: `#!/bin/bash
 # VPS1 Rollback Script
@@ -503,32 +540,50 @@ echo "--- VPS1 Rollback Complete ---"
       id: 'vps2-setup',
       title: 'VPS2 (Exit Node) - Double VPN Setup Script',
       description: 'Configures VPS2 as the final exit point for all traffic.',
-      icon: Terminal,
+      icon: Binoculars,
       content: `#!/bin/bash
 # VPS2 Setup Script (Exit Node) - IP: ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
 set -e
 
-echo "--- Starting VPS2 Exit Node Setup ---"
+# Logging setup
+LOG_DIR="/root/VPS Installation Log"
+LOG_FILE="$LOG_DIR/installation_steps.txt"
+mkdir -p "$LOG_DIR"
+echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
+echo "Started at: $(date)" >> "$LOG_FILE"
+
+log_step() {
+  echo "[$(date)] $1" >> "$LOG_FILE"
+  echo "$1"
+}
+
+log_step "--- Starting VPS2 Exit Node Setup ---"
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. Update & Install
+log_step "Updating system packages..."
 apt-get update && apt-get upgrade -y
+
 # Stop and remove previous versions
-echo "Cleaning up previous installations..."
+log_step "Cleaning up previous installations..."
 systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
 systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
 rm -rf /etc/wireguard
+
+log_step "Installing WireGuard and networking tools..."
 apt-get install -y wireguard iptables curl
 
 # 2. Enable IP Forwarding
+log_step "Enabling IP Forwarding..."
 echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
 sysctl -p
 
 # 3. Setup WireGuard (wg0)
+log_step "Configuring WireGuard (wg0) as Exit Node..."
 mkdir -p /etc/wireguard
 cd /etc/wireguard
-PRIV_KEY=$(wg genkey)
-PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
+PRIV_KEY="__VPS2_WG0_PRIV_KEY__"
+PUB_KEY="__VPS2_WG0_PUB_KEY__"
 echo "$PRIV_KEY" > privatekey
 echo "$PUB_KEY" > publickey
 
@@ -540,7 +595,7 @@ ListenPort = 51822
 MTU = 1280
 
 [Peer]
-PublicKey = <PASTE_VPS1_WG1_PUBLIC_KEY>
+PublicKey = __VPS1_WG1_PUB_KEY__
 AllowedIPs = 10.9.0.0/24
 EOF
 
@@ -548,19 +603,22 @@ systemctl enable wg-quick@wg0
 systemctl start wg-quick@wg0
 
 # Output public key for the app to capture
+log_step "Capturing public key..."
 echo "publickey: $PUB_KEY"
 
 # 4. EXIT NODE ROUTING (Tunnel -> Internet)
+log_step "Configuring IPTables routing rules..."
 iptables -A INPUT -p udp --dport 51822 -j ACCEPT
 iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o eth0 -j MASQUERADE
 iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
 iptables -A FORWARD -o wg0 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # Save rules
+log_step "Saving IPTables rules permanently..."
 apt-get install -y iptables-persistent
 netfilter-persistent save
 
-echo "--- VPS2 Exit Node Setup Complete ---"
+log_step "--- VPS2 Exit Node Setup Complete ---"
 `,
       rollbackContent: `#!/bin/bash
 # VPS2 Rollback Script
@@ -571,6 +629,84 @@ rm -f /etc/wireguard/wg0.conf
 iptables -t nat -F
 iptables -F
 echo "--- VPS2 Rollback Complete ---"
+`
+    },
+    {
+      id: 'vps-check',
+      title: 'VPS Readiness Check (vps-check.sh)',
+      description: 'Verifies if the VPS meets the requirements for Double VPN installation (OS, Root, Kernel, Network).',
+      icon: Activity,
+      content: `#!/bin/bash
+# Double Tunnel - VPS Readiness Check Script
+echo "--- Double Tunnel: System Readiness Check ---"
+echo "Checking at: $(date)"
+echo ""
+
+# 1. Check for Root Privileges
+if [ "$EUID" -ne 0 ]; then
+  echo "[ERROR] This script must be run as root. Use 'sudo su' or 'sudo bash'."
+  exit 1
+else
+  echo "[OK] Running as root."
+fi
+
+# 2. Check OS Distribution
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
+    echo "[OK] OS: $PRETTY_NAME detected."
+  else
+    echo "[WARN] OS: $PRETTY_NAME detected. This system is optimized for Ubuntu/Debian."
+  fi
+else
+  echo "[ERROR] Could not determine OS distribution."
+fi
+
+# 3. Check Kernel Version (WireGuard requires 5.6+ or module)
+KERNEL_VER=$(uname -r)
+echo "[INFO] Kernel Version: $KERNEL_VER"
+if [[ $(echo "$KERNEL_VER" | cut -d. -f1) -ge 5 && $(echo "$KERNEL_VER" | cut -d. -f2) -ge 6 ]]; then
+  echo "[OK] Kernel supports WireGuard natively."
+else
+  echo "[INFO] Kernel < 5.6. WireGuard module will be installed via DKMS."
+fi
+
+# 4. Check for Required Tools
+for tool in curl iptables docker; do
+  if command -v $tool >/dev/null 2>&1; then
+    echo "[OK] Tool '$tool' is already installed."
+  else
+    echo "[INFO] Tool '$tool' is missing (will be installed during setup)."
+  fi
+done
+
+# 5. Check IP Forwarding Capability
+if [ -f /proc/sys/net/ipv4/ip_forward ]; then
+  echo "[OK] IP Forwarding is supported by the kernel."
+else
+  echo "[ERROR] IP Forwarding is NOT supported. Double VPN will not work."
+fi
+
+# 6. Check for Port Conflicts (Standard Ports)
+for port in 22 51820 51821 51822; do
+  if ss -tuln | grep -q ":$port "; then
+    if [ "$port" -eq 22 ]; then
+      echo "[OK] Port 22 (SSH) is active (Required for management)."
+    else
+      echo "[WARN] Port $port is already in use. Setup will attempt to reassign."
+    fi
+  else
+    echo "[OK] Port $port is available."
+  fi
+done
+
+echo ""
+echo "--- Readiness Check Complete ---"
+if [ "$ID" == "ubuntu" ] || [ "$ID" == "debian" ]; then
+  echo "System is READY for installation."
+else
+  echo "System may require manual adjustments for non-Debian distributions."
+fi
 `
     },
     {
@@ -755,6 +891,7 @@ pause
 
   const sshExecute = async (vps: VPSConfig, command: string) => {
     try {
+      console.log(`Executing SSH command on ${vps.ip}...`);
       const response = await fetch('/api/ssh/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -767,12 +904,22 @@ pause
       });
       
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'SSH Execution Failed');
+        let errorMessage = 'SSH Execution Failed';
+        try {
+          const errorData = await response.json();
+          errorMessage = errorData.error || errorMessage;
+        } catch (e) {
+          errorMessage = `HTTP Error ${response.status}: ${response.statusText}`;
+        }
+        throw new Error(errorMessage);
       }
       
       return await response.json();
     } catch (error: any) {
+      console.error(`SSH Fetch Error for ${vps.ip}:`, error);
+      if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
+        throw new Error(`SSH Error (${vps.ip}): Backend unreachable or connection refused. Please ensure the server is running.`);
+      }
       throw new Error(`SSH Error (${vps.ip}): ${error.message}`);
     }
   };
@@ -790,24 +937,28 @@ pause
 
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
 
-    const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
     try {
       if (isCleanInstall) {
         addLog("Initiating FULL SYSTEM RESET: Purging all previous versions...", "info");
-        addLog("Removing WireGuard, Docker, and all configuration files...", "cmd");
-        await sleep(1500);
-        addLog("Restoring networking state and clearing registry-equivalent configs...", "cmd");
-        await sleep(1000);
+        
+        const resetScript = INITIAL_SCRIPTS.find(s => s.id === 'full-wipe')?.content || '';
+        
+        addLog(`Resetting VPS1 (${activeTunnel.vps1.ip})...`, "cmd");
+        const res1 = await sshExecute(activeTunnel.vps1, resetScript);
+        if (res1.code !== 0) throw new Error(`VPS1 Reset Failed: ${res1.errorOutput}`);
+        
+        addLog(`Resetting VPS2 (${activeTunnel.vps2.ip})...`, "cmd");
+        const res2 = await sshExecute(activeTunnel.vps2, resetScript);
+        if (res2.code !== 0) throw new Error(`VPS2 Reset Failed: ${res2.errorOutput}`);
+        
+        addLog("Full System Reset Complete.", "success");
       }
 
       // --- Port Verification Phase ---
       addLog("Starting Port Verification Phase...", "info");
-      await sleep(1000);
 
       const checkPorts = async (vpsName: string, vpsKey: 'vps1' | 'vps2') => {
-        addLog(`Verifying ports on ${vpsName}...`, "info");
-        await sleep(800);
+        addLog(`Verifying ports on ${vpsName} (${activeTunnel[vpsKey].ip})...`, "info");
         
         const standardPorts = [
           { port: 22, service: 'SSH', purpose: 'Remote Management' },
@@ -821,23 +972,31 @@ pause
 
         for (const p of standardPorts) {
           addLog(`Checking port ${p.port} (${p.service})...`, "cmd");
-          await sleep(400);
           
-          // Simulate a random conflict for demo purposes (e.g. if IP ends in .75 or .149)
-          const isOccupied = Math.random() > 0.8; 
-          
-          if (isOccupied) {
-            const occupiedBy = ['Apache2', 'Nginx', 'Docker Proxy', 'Custom Service'][Math.floor(Math.random() * 4)];
-            addLog(`Conflict detected on port ${p.port}! Occupied by: ${occupiedBy}`, "error");
-            addLog(`Purpose of ${p.service}: ${p.purpose}`, "info");
-            
-            const newPort = p.port + 1000 + Math.floor(Math.random() * 100);
-            addLog(`Reassigning ${p.service} to port ${newPort}...`, "success");
-            
-            conflicts.push({ port: p.port, service: occupiedBy, purpose: `Original port for ${p.service} (${p.purpose}) was occupied.` });
-            assignedPorts[p.service] = newPort;
-          } else {
-            addLog(`Port ${p.port} is available.`, "success");
+          try {
+            // Real SSH check for port availability
+            const checkCmd = `ss -tuln | grep -q ":${p.port} " && echo "occupied" || echo "free"`;
+            const res = await sshExecute(activeTunnel[vpsKey], checkCmd);
+            const status = res.stdout.trim();
+
+            if (status === 'occupied') {
+              if (p.port === 22) {
+                addLog(`Port 22 (SSH) is active. Required for management.`, "success");
+                assignedPorts[p.service] = p.port;
+              } else {
+                addLog(`Conflict detected on port ${p.port}!`, "error");
+                const newPort = p.port + 1000 + Math.floor(Math.random() * 100);
+                addLog(`Reassigning ${p.service} to port ${newPort}...`, "success");
+                conflicts.push({ port: p.port, service: 'Unknown', purpose: `Original port for ${p.service} occupied.` });
+                assignedPorts[p.service] = newPort;
+              }
+            } else {
+              addLog(`Port ${p.port} is available.`, "success");
+              assignedPorts[p.service] = p.port;
+            }
+          } catch (err: any) {
+            addLog(`Failed to check port ${p.port}: ${err.message}`, "error");
+            // Fallback to standard port if check fails
             assignedPorts[p.service] = p.port;
           }
         }
@@ -855,7 +1014,6 @@ pause
       await checkPorts("VPS1 (Gateway)", "vps1");
 
       addLog("Port Verification Complete. Proceeding with deployment...", "success");
-      await sleep(1000);
 
       // --- Key Generation Phase ---
       addLog("Generating secure WireGuard keys for all nodes...", "info");
@@ -888,9 +1046,9 @@ pause
       
       let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
       // Inject keys into VPS2 Setup
-      vps2Setup = vps2Setup.replace('$PRIV_KEY', d_vps2_wg0_priv);
-      vps2Setup = vps2Setup.replace('$PUB_KEY', d_vps2_wg0_pub);
-      vps2Setup = vps2Setup.replace('<PASTE_VPS1_WG1_PUBLIC_KEY>', d_vps1_wg1_pub);
+      vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PRIV_KEY__', d_vps2_wg0_priv);
+      vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
+      vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
 
       const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
       
@@ -907,8 +1065,8 @@ pause
 
       let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
       // Inject keys into VPS1 Setup
-      vps1Setup = vps1Setup.replace('$(wg genkey | tee /etc/wireguard/vps1_tunnel_priv)', d_vps1_wg1_priv);
-      vps1Setup = vps1Setup.replace('<PASTE_VPS2_PUBLIC_KEY>', d_vps2_wg0_pub);
+      vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PRIV_KEY__', d_vps1_wg1_priv);
+      vps1Setup = vps1Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
       
       const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
       
@@ -920,86 +1078,95 @@ pause
       updateActiveTunnel({ step: 2, status: 'deployed' });
 
       addLog("Final system verification...", "info");
-      await sleep(1500);
-      addLog("Verifying tunnel connectivity...", "info");
-      await sleep(2000);
-      addLog("Tunnel established: 10.9.0.1 <-> 10.9.0.254", "success");
-      addLog("Verifying IP forwarding... [ENABLED]", "success");
-      addLog("Verifying IPTables rules... [ACTIVE]", "success");
+      
+      addLog("Verifying VPS1 tunnel interface (wg1)...", "cmd");
+      const wg1Check = await sshExecute(activeTunnel.vps1, "wg show wg1");
+      if (wg1Check.code === 0) {
+        addLog("VPS1 wg1 interface is UP.", "success");
+      } else {
+        addLog("VPS1 wg1 interface is DOWN or not configured.", "error");
+      }
+
+      addLog("Testing connectivity between VPS1 and VPS2 (10.9.0.1 <-> 10.9.0.254)...", "cmd");
+      const pingCheck = await sshExecute(activeTunnel.vps1, "ping -c 3 10.9.0.254");
+      if (pingCheck.code === 0) {
+        addLog("Tunnel connectivity verified!", "success");
+      } else {
+        addLog("Tunnel connectivity failed. VPS2 is not reachable via 10.9.0.254", "error");
+      }
+
+      addLog("Verifying IP forwarding...", "cmd");
+      const ipForwardCheck = await sshExecute(activeTunnel.vps1, "cat /proc/sys/net/ipv4/ip_forward");
+      if (ipForwardCheck.stdout.trim() === '1') {
+        addLog("IP Forwarding is ENABLED.", "success");
+      } else {
+        addLog("IP Forwarding is DISABLED.", "error");
+      }
+
       addLog("Double VPN Deployment Successful!", "success");
-      await sleep(1000);
 
       // --- Post-Deployment Key Update Phase ---
       addLog("Initiating Post-Deployment Key Update & Sync...", "info");
-      await sleep(1200);
-      addLog("Verifying secure handshake with new keys... [OK]", "success");
-      addLog("All VPS WireGuard keys have been updated and synchronized.", "success");
+      const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
+      addLog("Running lodgeguard-sync.sh on VPS1...", "cmd");
+      const syncRes = await sshExecute(activeTunnel.vps1, syncScript);
+      if (syncRes.code === 0) {
+        addLog("All VPS WireGuard keys have been updated and synchronized.", "success");
+      } else {
+        addLog(`Key synchronization failed: ${syncRes.errorOutput}`, "error");
+      }
 
     } catch (error: any) {
       addLog(`DEPLOYMENT FAILED: ${error.message}`, "error");
       updateActiveTunnel({ status: 'failed' });
-      await sleep(1000);
+      
       addLog("Initiating Automated Rollback...", "info");
-      await sleep(1500);
-      addLog("Cleaning up VPS1 partial installation...", "cmd");
-      await sleep(2000);
+      const vps1Rollback = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.rollbackContent || '';
+      const vps2Rollback = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.rollbackContent || '';
+      
+      if (vps1Rollback) {
+        addLog("Cleaning up VPS1...", "cmd");
+        await sshExecute(activeTunnel.vps1, vps1Rollback).catch(e => console.error("VPS1 Rollback failed", e));
+      }
+      if (vps2Rollback) {
+        addLog("Cleaning up VPS2...", "cmd");
+        await sshExecute(activeTunnel.vps2, vps2Rollback).catch(e => console.error("VPS2 Rollback failed", e));
+      }
+      
       addLog("Rollback Complete. System is stable.", "success");
     }
   };
 
-  const runAutomation = (scriptName: string = 'lodgeguard-sync') => {
+  const runAutomation = async (scriptId: string) => {
     setIsRotating(true);
-    
-    // Generate new keys for rotation
-    const r_vps1_wg0_priv = generateWGKey();
-    const r_vps1_wg0_pub = generateWGKey();
-    const r_vps1_wg1_priv = generateWGKey();
-    const r_vps1_wg1_pub = generateWGKey();
-    const r_vps2_wg0_priv = generateWGKey();
-    const r_vps2_wg0_pub = generateWGKey();
-
-    const output = scriptName.includes('sync') ? [
-      "--- Initiating Secure Key Exchange ---",
-      "[*] Generating new ephemeral keys on VPS1...",
-      "[*] Encrypting public key with existing tunnel...",
-      `[*] Sending key to VPS2 (${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'})...`,
-      "[+] VPS2 acknowledged. Rotating keys...",
-      "[*] Updating wg0.conf on both nodes...",
-      "[*] Restarting WireGuard services...",
-      "[SUCCESS] Tunnel re-established with new keys.",
-      "Next rotation scheduled in 24 hours."
-    ] : [
-      `--- Executing ${scriptName}.sh ---`,
-      "[*] Checking environment context...",
-      "[*] Validating secure tunnel state...",
-      "[*] Applying automated configuration...",
-      "[SUCCESS] Script execution completed successfully."
-    ];
-
-    setTerminalOutput(prev => [...prev, ...output]);
-    if (xtermRef.current) {
-      output.forEach(line => xtermRef.current?.writeln(line));
-    }
-    
-    setTimeout(() => {
-      if (scriptName.includes('sync')) {
-        updateActiveTunnel({
-          vps1: {
-            ...activeTunnel.vps1,
-            wg0PrivateKey: r_vps1_wg0_priv,
-            wg0PublicKey: r_vps1_wg0_pub,
-            wg1PrivateKey: r_vps1_wg1_priv,
-            wg1PublicKey: r_vps1_wg1_pub,
-          },
-          vps2: {
-            ...activeTunnel.vps2,
-            wg0PrivateKey: r_vps2_wg0_priv,
-            wg0PublicKey: r_vps2_wg0_pub,
-          }
-        });
-      }
+    const script = INITIAL_SCRIPTS.find(s => s.id === scriptId);
+    if (!script) {
+      addLog(`Script ${scriptId} not found.`, "error");
       setIsRotating(false);
-    }, 2000);
+      return;
+    }
+
+    addLog(`Executing ${script.title}...`, "info");
+    try {
+      const res = await sshExecute(activeTunnel.vps1, script.content);
+      if (res.code === 0) {
+        addLog(`${script.title} executed successfully.`, "success");
+        if (xtermRef.current) {
+          xtermRef.current.writeln(`\x1b[1;32m[${script.title} Output]\x1b[0m`);
+          xtermRef.current.writeln(res.stdout);
+        }
+      } else {
+        addLog(`${script.title} failed: ${res.errorOutput}`, "error");
+        if (xtermRef.current) {
+          xtermRef.current.writeln(`\x1b[1;31m[${script.title} Error]\x1b[0m`);
+          xtermRef.current.writeln(res.errorOutput);
+        }
+      }
+    } catch (err: any) {
+      addLog(`Automation Error: ${err.message}`, "error");
+    } finally {
+      setIsRotating(false);
+    }
   };
 
   const executeCommand = (command: string) => {
@@ -1334,7 +1501,12 @@ PersistentKeepalive = 25`;
               animate={{ opacity: 1, x: 0 }}
               className="min-w-0"
             >
-              <h1 className="text-white font-bold tracking-tighter text-lg truncate">Double Tunnel</h1>
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 bg-emerald-500/20 border border-emerald-500/30 rounded-lg flex items-center justify-center">
+                  <Binoculars className="w-5 h-5 text-emerald-500" />
+                </div>
+                <h1 className="text-white font-bold tracking-tighter text-lg truncate">Double Tunnel VPN</h1>
+              </div>
               <p className="text-[10px] text-zinc-500 font-mono uppercase tracking-widest truncate">Console</p>
             </motion.div>
           )}
@@ -1384,6 +1556,25 @@ PersistentKeepalive = 25`;
           >
             {isSidebarCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
           </button>
+
+          <div className={cn(
+            "flex items-center bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden transition-all duration-300 mb-2",
+            isSidebarCollapsed ? "p-1.5 justify-center" : "gap-2 p-2"
+          )}>
+            <div className={cn(
+              "w-2 h-2 rounded-full shrink-0",
+              backendStatus === 'online' ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" : 
+              backendStatus === 'offline' ? "bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.5)]" : 
+              "bg-zinc-600 animate-pulse"
+            )} />
+            {!isSidebarCollapsed && (
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] font-semibold text-zinc-200 truncate uppercase tracking-wider">
+                  Backend: {backendStatus}
+                </p>
+              </div>
+            )}
+          </div>
 
           <div className={cn(
             "flex items-center bg-zinc-900 rounded-xl border border-zinc-800 overflow-hidden transition-all duration-300",
@@ -1707,7 +1898,7 @@ PersistentKeepalive = 25`;
                     <Card title="Quick Actions">
                       <div className="grid grid-cols-2 gap-3">
                         <button 
-                          onClick={() => runAutomation()}
+                          onClick={() => runAutomation('sync')}
                           disabled={isRotating}
                           className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl hover:bg-zinc-900 transition-colors flex flex-col items-center gap-2 group disabled:opacity-50"
                         >
@@ -2046,9 +2237,29 @@ PersistentKeepalive = 25`;
                           </div>
                         )}
                         <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
-                          <div className="flex items-center gap-2 mb-2">
-                            <Server className="w-4 h-4 text-emerald-500" />
-                            <span className="text-xs font-bold text-zinc-400 uppercase">VPS1 (Gateway / Hop 1)</span>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <Server className="w-4 h-4 text-emerald-500" />
+                              <span className="text-xs font-bold text-zinc-400 uppercase">VPS1 (Gateway / Hop 1)</span>
+                            </div>
+                            <button 
+                              onClick={async () => {
+                                try {
+                                  addLog(`Testing connection to VPS1 (${activeTunnel.vps1.ip})...`, "info");
+                                  const res = await sshExecute(activeTunnel.vps1, "echo 'Connection Successful'");
+                                  if (res.code === 0) {
+                                    addLog("VPS1 Connection Successful!", "success");
+                                  } else {
+                                    addLog(`VPS1 Connection Failed: ${res.errorOutput}`, "error");
+                                  }
+                                } catch (err: any) {
+                                  addLog(`VPS1 Connection Error: ${err.message}`, "error");
+                                }
+                              }}
+                              className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-wider px-2 py-1 rounded border border-emerald-500/30 hover:bg-emerald-500/10 transition-all"
+                            >
+                              Test Connection
+                            </button>
                           </div>
                           <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-1">
@@ -2098,9 +2309,29 @@ PersistentKeepalive = 25`;
                         </div>
 
                         <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
-                          <div className="flex items-center gap-2 mb-2">
-                            <Server className="w-4 h-4 text-zinc-500" />
-                            <span className="text-xs font-bold text-zinc-400 uppercase">VPS2 (Exit Node / Hop 2)</span>
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-2">
+                              <Server className="w-4 h-4 text-zinc-500" />
+                              <span className="text-xs font-bold text-zinc-400 uppercase">VPS2 (Exit Node / Hop 2)</span>
+                            </div>
+                            <button 
+                              onClick={async () => {
+                                try {
+                                  addLog(`Testing connection to VPS2 (${activeTunnel.vps2.ip})...`, "info");
+                                  const res = await sshExecute(activeTunnel.vps2, "echo 'Connection Successful'");
+                                  if (res.code === 0) {
+                                    addLog("VPS2 Connection Successful!", "success");
+                                  } else {
+                                    addLog(`VPS2 Connection Failed: ${res.errorOutput}`, "error");
+                                  }
+                                } catch (err: any) {
+                                  addLog(`VPS2 Connection Error: ${err.message}`, "error");
+                                }
+                              }}
+                              className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-wider px-2 py-1 rounded border border-emerald-500/30 hover:bg-emerald-500/10 transition-all"
+                            >
+                              Test Connection
+                            </button>
                           </div>
                           <div className="grid grid-cols-2 gap-4">
                             <div className="space-y-1">
@@ -2538,7 +2769,7 @@ AllowedIPs = 10.8.0.0/24`}
 
                 <div className="flex justify-end">
                   <button 
-                    onClick={() => runAutomation()}
+                    onClick={() => runAutomation('sync')}
                     disabled={isRotating}
                     className="flex items-center gap-2 px-4 py-2 bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 rounded-lg hover:bg-emerald-500/20 transition-all text-xs font-bold uppercase disabled:opacity-50"
                   >
