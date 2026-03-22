@@ -45,6 +45,16 @@ import { cn } from './lib/utils';
 
 // --- Types ---
 
+declare global {
+  interface Window {
+    electron?: {
+      sshExecute: (config: any) => Promise<any>;
+      send: (channel: string, data: any) => void;
+      receive: (channel: string, func: (...args: any[]) => void) => void;
+    };
+  }
+}
+
 interface Peer {
   id: string;
   name: string;
@@ -300,10 +310,26 @@ export default function App() {
       xtermRef.current = term;
       term.focus();
 
+      const terminalElement = terminalRef.current;
+      const handleContextMenu = async (e: MouseEvent) => {
+        e.preventDefault();
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) {
+            term.write(text);
+            currentLine += text;
+          }
+        } catch (err) {
+          console.error('Failed to read clipboard:', err);
+        }
+      };
+      terminalElement?.addEventListener('contextmenu', handleContextMenu);
+
       const handleResize = () => fitAddon.fit();
       window.addEventListener('resize', handleResize);
       return () => {
         window.removeEventListener('resize', handleResize);
+        terminalElement?.removeEventListener('contextmenu', handleContextMenu);
         term.dispose();
         xtermRef.current = null;
       };
@@ -893,6 +919,22 @@ pause
   const sshExecute = async (vps: VPSConfig, command: string) => {
     try {
       console.log(`Executing SSH command on ${vps.ip}...`);
+      
+      // Use Electron IPC if available (for built app)
+      if (window.electron && window.electron.sshExecute) {
+        const result = await window.electron.sshExecute({
+          host: vps.ip,
+          username: vps.user,
+          password: vps.password,
+          command
+        });
+        if (result.error) {
+          throw new Error(result.error);
+        }
+        return result;
+      }
+
+      // Fallback to fetch (for development/web)
       const response = await fetch('/api/ssh/execute', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1679,8 +1721,12 @@ PersistentKeepalive = 25`;
               <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider">System Online</span>
             </div>
-            <button className="p-2 hover:bg-zinc-900 rounded-lg transition-colors">
-              <Settings className="w-5 h-5 text-zinc-500" />
+            <button 
+              onClick={() => setActiveTab('deploy')}
+              className="p-2 hover:bg-zinc-900 rounded-lg transition-colors"
+              title="Project Settings"
+            >
+              <Settings className="w-5 h-5 text-zinc-500 hover:text-emerald-500 transition-colors" />
             </button>
           </div>
         </header>

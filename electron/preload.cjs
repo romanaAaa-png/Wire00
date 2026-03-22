@@ -12,5 +12,6 @@ contextBridge.exposeInMainWorld('electron', {
     if (validChannels.includes(channel)) {
       ipcRenderer.on(channel, (event, ...args) => func(...args));
     }
-  }
+  },
+  sshExecute: (config) => ipcRenderer.invoke('ssh-execute', config)
 });
