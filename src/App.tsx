@@ -1,4 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Terminal as XTerm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 import { 
   Shield, 
   Server, 
@@ -218,6 +220,62 @@ export default function App() {
   const [vpsLogs, setVpsLogs] = useState<{vps: string, logs: string}[]>([]);
   const [terminalInput, setTerminalInput] = useState('');
   const [pasteBuffer, setPasteBuffer] = useState('');
+  const terminalRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<XTerm | null>(null);
+
+  useEffect(() => {
+    if (activeTab === 'terminal' && terminalRef.current && !xtermRef.current) {
+      const term = new XTerm({
+        cursorBlink: true,
+        theme: {
+          background: '#0c0c0c',
+          foreground: '#10b981',
+          cursor: '#10b981',
+          selectionBackground: 'rgba(16, 185, 129, 0.3)',
+        },
+        fontSize: 14,
+        fontFamily: '"JetBrains Mono", monospace',
+        rows: 24,
+      });
+
+      const fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(terminalRef.current);
+      fitAddon.fit();
+
+      term.writeln('\x1b[1;32m _      _____ _____  ______ _____ _    _  _   _____  _____\x1b[0m');
+      term.writeln('\x1b[1;32m| |    |  _  |  __ \\|  ____/ ____| |  | |/ \\ |  __ \\|  __ \\\x1b[0m');
+      term.writeln('\x1b[1;32m| |    | | | | |  | | |__ | |  __| |  | / _ \\| |__) | |  |\x1b[0m');
+      term.writeln('\x1b[1;32m| |    | | | | |  | |  __|| | |_ | |  | / ___ \\  _  /| |  |\x1b[0m');
+      term.writeln('\x1b[1;32m| |____\\ \\_/ / |__| | |___| |__| | |__| / /   \\ \\ | \\ \\| |__|\x1b[0m');
+      term.writeln('\x1b[1;32m|______|\\___/|_____/|______\\_____|\\____/_/     \\_\\_|  \\_\\_____/\x1b[0m');
+      term.writeln('');
+      term.writeln(`\x1b[1;30mLast login: ${new Date().toLocaleString()} from ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}\x1b[0m`);
+      term.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
+
+      term.onData(data => {
+        if (data === '\r') {
+          // Handle enter
+          term.write('\r\n\x1b[1;32mroot@vps1:~# \x1b[0m');
+        } else if (data === '\u007f') {
+          // Handle backspace
+          term.write('\b \b');
+        } else {
+          term.write(data);
+        }
+      });
+
+      xtermRef.current = term;
+
+      const handleResize = () => fitAddon.fit();
+      window.addEventListener('resize', handleResize);
+      return () => {
+        window.removeEventListener('resize', handleResize);
+        term.dispose();
+        xtermRef.current = null;
+      };
+    }
+  }, [activeTab]);
 
   useEffect(() => {
     const originalLog = console.log;
@@ -921,6 +979,9 @@ pause
     ];
 
     setTerminalOutput(prev => [...prev, ...output]);
+    if (xtermRef.current) {
+      output.forEach(line => xtermRef.current?.writeln(line));
+    }
     
     setTimeout(() => {
       if (scriptName.includes('sync')) {
@@ -948,6 +1009,9 @@ pause
     if (!trimmedCmd) return;
 
     setTerminalOutput(prev => [...prev, `root@vps1:~# ${trimmedCmd}`]);
+    if (xtermRef.current) {
+      xtermRef.current.writeln(`\x1b[1;32mroot@vps1:~# \x1b[0m\x1b[1;37m${trimmedCmd}\x1b[0m`);
+    }
 
     // Check if it's a script execution
     const scriptMatch = trimmedCmd.match(/^\.\/([a-zA-Z0-9._-]+)\.sh$/);
@@ -963,7 +1027,9 @@ pause
       if (scriptExists || scriptName === 'lodgeguard-sync') {
         runAutomation(scriptName);
       } else {
-        setTerminalOutput(prev => [...prev, `bash: ./${scriptName}.sh: No such file or directory`]);
+        const msg = `bash: ./${scriptName}.sh: No such file or directory`;
+        setTerminalOutput(prev => [...prev, msg]);
+        if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
       }
       return;
     }
@@ -971,28 +1037,54 @@ pause
     // Handle other commands
     const cmd = trimmedCmd.toLowerCase();
     if (cmd === 'ls') {
-      setTerminalOutput(prev => [...prev, 'lodgeguard-sync.sh  vps1-setup.sh  vps2-setup.sh  wg0.conf  wg1.conf']);
+      const msg = 'lodgeguard-sync.sh  vps1-setup.sh  vps2-setup.sh  wg0.conf  wg1.conf';
+      setTerminalOutput(prev => [...prev, msg]);
+      if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;34m${msg}\x1b[0m`);
     } else if (cmd === 'clear') {
       setTerminalOutput([]);
+      if (xtermRef.current) {
+        xtermRef.current.clear();
+        xtermRef.current.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
+      }
     } else if (cmd === 'whoami') {
-      setTerminalOutput(prev => [...prev, 'root']);
+      const msg = 'root';
+      setTerminalOutput(prev => [...prev, msg]);
+      if (xtermRef.current) xtermRef.current.writeln(msg);
     } else if (cmd === 'pwd') {
-      setTerminalOutput(prev => [...prev, '/root']);
+      const msg = '/root';
+      setTerminalOutput(prev => [...prev, msg]);
+      if (xtermRef.current) xtermRef.current.writeln(msg);
     } else if (cmd === 'help') {
-      setTerminalOutput(prev => [...prev, 'Available commands: ls, clear, whoami, pwd, help, date, cat [file], ./[script].sh']);
+      const msg = 'Available commands: ls, clear, whoami, pwd, help, date, cat [file], ./[script].sh';
+      setTerminalOutput(prev => [...prev, msg]);
+      if (xtermRef.current) xtermRef.current.writeln(msg);
     } else if (cmd === 'date') {
-      setTerminalOutput(prev => [...prev, new Date().toString()]);
+      const msg = new Date().toString();
+      setTerminalOutput(prev => [...prev, msg]);
+      if (xtermRef.current) xtermRef.current.writeln(msg);
     } else if (cmd.startsWith('cat ')) {
       const fileName = trimmedCmd.split(' ')[1];
       if (fileName === 'lodgeguard-sync.sh' || fileName === './lodgeguard-sync.sh') {
-        setTerminalOutput(prev => [...prev, ...INITIAL_SCRIPTS[0].content.split('\n')]);
+        const content = INITIAL_SCRIPTS[0].content;
+        setTerminalOutput(prev => [...prev, ...content.split('\n')]);
+        if (xtermRef.current) xtermRef.current.writeln(content);
       } else if (fileName) {
-        setTerminalOutput(prev => [...prev, `cat: ${fileName}: No such file or directory`]);
+        const msg = `cat: ${fileName}: No such file or directory`;
+        setTerminalOutput(prev => [...prev, msg]);
+        if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
       } else {
-        setTerminalOutput(prev => [...prev, 'cat: missing operand']);
+        const msg = 'cat: missing operand';
+        setTerminalOutput(prev => [...prev, msg]);
+        if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
       }
     } else {
-      setTerminalOutput(prev => [...prev, `bash: ${trimmedCmd}: command not found`]);
+      const msg = `bash: ${trimmedCmd}: command not found`;
+      setTerminalOutput(prev => [...prev, msg]);
+      if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
+    }
+
+    if (xtermRef.current) {
+      xtermRef.current.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
     }
   };
 
@@ -2221,42 +2313,8 @@ PersistentKeepalive = 25`;
                           </button>
                         </div>
                       </div>
-                      <div className="flex-1 p-6 font-mono text-sm overflow-y-auto bg-[#0c0c0c] custom-scrollbar">
-                        <div className="space-y-2">
-                          <pre className="text-emerald-500 leading-none mb-6">
-{` _      _____ _____  ______ _____ _    _  _   _____  _____  
-| |    |  _  |  __ \\|  ____/ ____| |  | |/ \\ |  __ \\|  __ \\ 
-| |    | | | | |  | | |__ | |  __| |  | / _ \\| |__) | |  | |
-| |    | | | | |  | |  __|| | |_ | |  | / ___ \\  _  /| |  | |
-| |____\\ \\_/ / |__| | |___| |__| | |__| / /   \\ \\ | \\ \\| |__| |
-|______|\\___/|_____/|______\\_____|\\____/_/     \\_\\_|  \\_\\_____/ 
-                                                               `}
-                          </pre>
-                          <p className="text-zinc-500">Last login: Sat Mar 21 18:45:12 2026 from ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}</p>
-                          <p className="text-emerald-500 font-bold">root@vps1:~# <span className="text-zinc-100">apt update</span></p>
-                          <p className="text-zinc-400">Hit:1 http://archive.ubuntu.com/ubuntu noble InRelease</p>
-                          <p className="text-zinc-400">Hit:2 http://archive.ubuntu.com/ubuntu noble-updates InRelease</p>
-                          <p className="text-zinc-400">Reading package lists... Done</p>
-                          <p className="text-zinc-400">All packages are up to date.</p>
-                          
-                          {terminalOutput.map((line, i) => (
-                            <p key={i} className={cn(
-                              line.startsWith('root@') ? "text-emerald-500 font-bold" : "text-zinc-400",
-                              line.includes('[SUCCESS]') && "text-emerald-400 font-bold",
-                              line.includes('[*]') && "text-zinc-500"
-                            )}>
-                              {line.startsWith('root@') ? (
-                                <>
-                                  {line.split(' ')[0]} <span className="text-zinc-100">{line.split(' ').slice(1).join(' ')}</span>
-                                </>
-                              ) : line}
-                            </p>
-                          ))}
-
-                          {!isRotating && (
-                            <p className="text-emerald-500 font-bold mt-4">root@vps1:~# <span className="inline-block w-2 h-5 bg-emerald-500 animate-pulse align-middle ml-1" /></p>
-                          )}
-                        </div>
+                      <div className="flex-1 p-0 font-mono text-sm overflow-hidden bg-[#0c0c0c]">
+                        <div ref={terminalRef} className="w-full h-full" />
                       </div>
                       <div className="px-6 py-3 bg-zinc-900 border-t border-zinc-800 flex items-center gap-4">
                         <Terminal className="w-4 h-4 text-emerald-500" />
