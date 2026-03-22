@@ -200,14 +200,15 @@ const Card = ({ children, className, title, icon: Icon }: { children: React.Reac
   </div>
 );
 
-const Badge = ({ children, variant = 'default' }: { children: React.ReactNode, variant?: 'default' | 'success' | 'warning' }) => {
+const Badge = ({ children, variant = 'default', className }: { children: React.ReactNode, variant?: 'default' | 'success' | 'warning' | 'zinc', className?: string }) => {
   const variants = {
     default: 'bg-zinc-800 text-zinc-400',
     success: 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20',
     warning: 'bg-amber-500/10 text-amber-500 border border-amber-500/20',
+    zinc: 'bg-zinc-800 text-zinc-400 border border-zinc-700'
   };
   return (
-    <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider", variants[variant])}>
+    <span className={cn("px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider", variants[variant], className)}>
       {children}
     </span>
   );
@@ -253,19 +254,32 @@ export default function App() {
       term.writeln(`\x1b[1;30mLast login: ${new Date().toLocaleString()} from ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}\x1b[0m`);
       term.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
 
+      let currentLine = '';
       term.onData(data => {
         if (data === '\r') {
           // Handle enter
-          term.write('\r\n\x1b[1;32mroot@vps1:~# \x1b[0m');
+          term.write('\r\n');
+          executeCommand(currentLine);
+          currentLine = '';
+          term.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
         } else if (data === '\u007f') {
           // Handle backspace
-          term.write('\b \b');
+          if (currentLine.length > 0) {
+            currentLine = currentLine.slice(0, -1);
+            term.write('\b \b');
+          }
+        } else if (data === '\u0003') {
+          // Handle Ctrl+C
+          term.write('^C\r\n\x1b[1;32mroot@vps1:~# \x1b[0m');
+          currentLine = '';
         } else {
+          currentLine += data;
           term.write(data);
         }
       });
 
       xtermRef.current = term;
+      term.focus();
 
       const handleResize = () => fitAddon.fit();
       window.addEventListener('resize', handleResize);
@@ -1451,6 +1465,12 @@ PersistentKeepalive = 25`;
             </div>
           </div>
           <div className="flex items-center gap-4">
+            {activeTunnel.status === 'deployed' && (
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 rounded-full border border-emerald-500/20">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
+                <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider">Client Connected</span>
+              </div>
+            )}
             <div className="flex items-center gap-2 px-3 py-1.5 bg-zinc-900 rounded-full border border-zinc-800">
               <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-wider">System Online</span>
@@ -1496,6 +1516,37 @@ PersistentKeepalive = 25`;
                   <div className="lg:col-span-2 space-y-6">
                     <Card title="Infrastructure Nodes" icon={Server}>
                       <div className="space-y-4">
+                        {/* Client Status Node */}
+                        <div className={cn(
+                          "p-4 bg-zinc-950 rounded-xl border border-zinc-800 border-l-4 transition-all group",
+                          activeTunnel.status === 'deployed' ? "border-l-emerald-500/50" : "border-l-zinc-800"
+                        )}>
+                          <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center gap-4">
+                              <div className={cn(
+                                "w-10 h-10 rounded-lg flex items-center justify-center transition-colors",
+                                activeTunnel.status === 'deployed' ? "bg-emerald-500/10 text-emerald-500" : "bg-zinc-800 text-zinc-500"
+                              )}>
+                                <Smartphone className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <h4 className="text-sm font-bold text-zinc-100">Client Connection Status</h4>
+                                <p className="text-xs text-zinc-500 font-mono">End-to-End Tunnel State</p>
+                              </div>
+                            </div>
+                            <div className="text-right">
+                              {activeTunnel.status === 'deployed' ? (
+                                <Badge variant="success" className="animate-pulse">CONNECTED</Badge>
+                              ) : (
+                                <Badge variant="zinc">DISCONNECTED</Badge>
+                              )}
+                              <p className="text-[10px] text-zinc-600 mt-1 font-mono">
+                                {activeTunnel.status === 'deployed' ? 'Tunnel Active' : 'No Active Session'}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
                         {/* Management Console Node */}
                         <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 border-l-4 border-l-blue-500/50 hover:border-zinc-700 transition-all group">
                           <div className="flex items-center justify-between mb-4">
@@ -2393,7 +2444,11 @@ PersistentKeepalive = 25`;
                         <div>
                           <div className="flex items-center gap-3 mb-1">
                             <h3 className="text-lg font-bold text-zinc-100">{peer.name}</h3>
-                            <Badge variant="success">Active</Badge>
+                            {activeTunnel.status === 'deployed' ? (
+                              <Badge variant="success" className="animate-pulse">Connected</Badge>
+                            ) : (
+                              <Badge variant="zinc">Offline</Badge>
+                            )}
                           </div>
                           <div className="flex items-center gap-4 text-xs text-zinc-500 font-mono">
                             <span className="flex items-center gap-1.5"><Globe className="w-3 h-3" /> {peer.allowedIPs}</span>
