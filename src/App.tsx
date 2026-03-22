@@ -560,12 +560,23 @@ fi
 
 # 4. Setup VPS-to-VPS Tunnel (wg1)
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
+# Detect primary interface and IP to ensure management traffic bypasses the tunnel
+PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+PRIMARY_IP=$(ip -4 addr show $PRIMARY_IF | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+
 mkdir -p /etc/wireguard
 cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
 PrivateKey = __VPS1_WG1_PRIV_KEY__
 Address = 10.9.0.1/24
 MTU = 1280
+
+# ASYMMETRIC ROUTING PROTECTION: Prevents lockout and fixes "Bad Gateway" issues
+# Ensures all traffic originating from or arriving at the physical IP bypasses the WG tunnel
+PostUp = ip rule add from $PRIMARY_IP lookup main
+PostUp = ip rule add iif $PRIMARY_IF lookup main
+PreDown = ip rule del from $PRIMARY_IP lookup main
+PreDown = ip rule del iif $PRIMARY_IF lookup main
 
 [Peer]
 PublicKey = __VPS2_WG0_PUB_KEY__
@@ -2154,6 +2165,17 @@ PersistentKeepalive = 25`;
                           <div className="space-y-1">
                             <p className="text-xs font-bold text-zinc-300">Antivirus Whitelisting</p>
                             <p className="text-[10px] text-zinc-500">Add the app directory to your AV exclusion list to prevent SSH connection timeouts.</p>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-3">
+                          <div className="w-5 h-5 rounded bg-amber-500/20 flex items-center justify-center shrink-0 mt-0.5">
+                            <AlertCircle className="w-3 h-3 text-amber-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-amber-500">Asymmetric Routing Fix</p>
+                            <p className="text-[10px] text-zinc-500 leading-relaxed">
+                              The deployment tool now implements <code className="text-zinc-300">ip rule</code> bypass for the primary interface. This ensures that incoming traffic on the physical IP (Web, SSH, etc.) is responded to via the correct gateway, preventing "Bad Gateway" errors and connection timeouts.
+                            </p>
                           </div>
                         </div>
                       </div>
