@@ -1073,6 +1073,51 @@ pause
   const [isRotating, setIsRotating] = useState(false);
   const [terminalOutput, setTerminalOutput] = useState<string[]>([]);
   
+  // --- Simulation: Live Peer Activity ---
+  useEffect(() => {
+    if (activeTunnel.status !== 'deployed') return;
+
+    const interval = setInterval(() => {
+      setTunnels(prev => prev.map(t => {
+        if (t.id !== activeTunnelId) return t;
+        
+        return {
+          ...t,
+          peers: t.peers.map(p => {
+            // Randomly update some peers
+            if (Math.random() > 0.7) {
+              const rxAdd = Math.floor(Math.random() * 500);
+              const txAdd = Math.floor(Math.random() * 200);
+              
+              const parseVal = (val: string) => {
+                const num = parseFloat(val);
+                if (val.includes('GB')) return num * 1024 * 1024;
+                if (val.includes('MB')) return num * 1024;
+                return num;
+              };
+
+              const formatVal = (kb: number) => {
+                if (kb > 1024 * 1024) return `${(kb / (1024 * 1024)).toFixed(2)} GB`;
+                if (kb > 1024) return `${(kb / 1024).toFixed(2)} MB`;
+                return `${kb.toFixed(0)} KB`;
+              };
+
+              return {
+                ...p,
+                lastHandshake: 'Just now',
+                transferRx: formatVal(parseVal(p.transferRx || '0 KB') + rxAdd),
+                transferTx: formatVal(parseVal(p.transferTx || '0 KB') + txAdd),
+              };
+            }
+            return p;
+          })
+        };
+      }));
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, [activeTunnel.status, activeTunnelId]);
+
   const addTunnel = () => {
     const newId = `tunnel-${Date.now()}`;
     const newTunnel: Tunnel = {
@@ -2075,6 +2120,45 @@ PersistentKeepalive = 25`;
                       </div>
                     </div>
                   </Card>
+
+                  <Card title="Security & Installation Guide" icon={ShieldAlert}>
+                    <div className="space-y-6">
+                      <div className="p-4 bg-amber-500/5 border border-amber-500/20 rounded-xl">
+                        <div className="flex gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-amber-500/20 flex items-center justify-center shrink-0">
+                            <AlertTriangle className="w-4 h-4 text-amber-500" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-amber-500 uppercase mb-1">Windows SmartScreen Note</p>
+                            <p className="text-[10px] text-zinc-400 leading-relaxed">
+                              If Windows blocks the <code className="text-zinc-200">.exe</code>, click <span className="text-zinc-200 font-bold">"More Info"</span> then <span className="text-zinc-200 font-bold">"Run Anyway"</span>. This occurs because the binary is not signed with a Microsoft Developer Certificate.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div className="flex items-start gap-3">
+                          <div className="w-5 h-5 rounded bg-zinc-800 flex items-center justify-center shrink-0 mt-0.5">
+                            <Check className="w-3 h-3 text-emerald-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-zinc-300">Run as Administrator</p>
+                            <p className="text-[10px] text-zinc-500">Required for modifying network interfaces and executing SSH commands.</p>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-3">
+                          <div className="w-5 h-5 rounded bg-zinc-800 flex items-center justify-center shrink-0 mt-0.5">
+                            <Check className="w-3 h-3 text-emerald-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-zinc-300">Antivirus Whitelisting</p>
+                            <p className="text-[10px] text-zinc-500">Add the app directory to your AV exclusion list to prevent SSH connection timeouts.</p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
                 </div>
               </motion.div>
             )}
@@ -2231,55 +2315,206 @@ PersistentKeepalive = 25`;
                     </Card>
 
                     <Card title="Network Topology (Dedicated Hop Architecture)" icon={Globe}>
-                      <div className="h-80 flex flex-col items-center justify-center border border-dashed border-zinc-800 rounded-xl bg-zinc-950/50 relative overflow-hidden">
-                        {/* Management Console (Top) */}
-                        <div className="flex flex-col items-center gap-2 mb-12 relative z-20">
-                          <div className="w-14 h-14 bg-blue-500/10 border border-blue-500/30 rounded-2xl flex items-center justify-center shadow-[0_0_20px_rgba(59,130,246,0.2)] animate-pulse">
-                            <Monitor className="w-7 h-7 text-blue-400" />
-                          </div>
-                          <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Management Console</span>
-                          <div className="absolute top-full w-px h-8 bg-gradient-to-b from-blue-500/50 to-transparent" />
+                      <div className="h-[450px] flex flex-col items-center justify-start p-8 border border-zinc-800 rounded-xl bg-zinc-950/50 relative overflow-hidden">
+                        {/* Background Grid Effect */}
+                        <div className="absolute inset-0 opacity-[0.03] pointer-events-none" 
+                             style={{ backgroundImage: 'radial-gradient(circle at 2px 2px, #10b981 1px, transparent 0)', backgroundSize: '24px 24px' }} />
+                        
+                        {/* 1. Management Console (Root of Control) */}
+                        <div className="relative z-20 mb-12">
+                          <motion.div 
+                            initial={{ opacity: 0, y: -20 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="flex flex-col items-center gap-2"
+                          >
+                            <div className="w-16 h-16 bg-blue-500/10 border border-blue-500/30 rounded-2xl flex items-center justify-center shadow-[0_0_30px_rgba(59,130,246,0.15)] relative group">
+                              <div className="absolute inset-0 bg-blue-500/20 rounded-2xl blur-xl group-hover:bg-blue-500/40 transition-all animate-pulse" />
+                              <Monitor className="w-8 h-8 text-blue-400 relative z-10" />
+                            </div>
+                            <span className="text-[10px] font-bold text-blue-400 uppercase tracking-[0.2em]">Management Hub</span>
+                          </motion.div>
+                          
+                          {/* Control Lines Branching Out */}
+                          <svg className="absolute top-full left-1/2 -translate-x-1/2 w-64 h-24 pointer-events-none overflow-visible">
+                            <motion.path 
+                              d="M 32 0 L 32 20 L -64 20 L -64 60" 
+                              fill="none" 
+                              stroke="currentColor" 
+                              strokeWidth="1" 
+                              className="text-blue-500/30"
+                              initial={{ pathLength: 0 }}
+                              animate={{ pathLength: 1 }}
+                              transition={{ duration: 1.5, ease: "easeInOut" }}
+                            />
+                            <motion.path 
+                              d="M 32 0 L 32 20 L 128 20 L 128 60" 
+                              fill="none" 
+                              stroke="currentColor" 
+                              strokeWidth="1" 
+                              className="text-blue-500/30"
+                              initial={{ pathLength: 0 }}
+                              animate={{ pathLength: 1 }}
+                              transition={{ duration: 1.5, ease: "easeInOut" }}
+                            />
+                            {/* Control Packets */}
+                            <motion.circle r="2" fill="#3b82f6"
+                              animate={{ offsetDistance: ["0%", "100%"] }}
+                              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                              style={{ offsetPath: "path('M 32 0 L 32 20 L -64 20 L -64 60')" }}
+                            />
+                            <motion.circle r="2" fill="#3b82f6"
+                              animate={{ offsetDistance: ["0%", "100%"] }}
+                              transition={{ duration: 3, repeat: Infinity, ease: "linear", delay: 1.5 }}
+                              style={{ offsetPath: "path('M 32 0 L 32 20 L 128 20 L 128 60')" }}
+                            />
+                          </svg>
                         </div>
 
-                        <div className="flex items-center gap-12 relative z-10">
-                          <div className="flex flex-col items-center gap-2">
-                            <div className="w-10 h-10 bg-zinc-900 border border-zinc-700 rounded-xl flex items-center justify-center shadow-2xl">
-                              <Users className="w-5 h-5 text-zinc-500" />
+                        {/* 2. Infrastructure Layer (VPS Nodes) */}
+                        <div className="flex items-center gap-32 relative z-10 mb-16">
+                          {/* VPS1 (Gateway) */}
+                          <motion.div 
+                            initial={{ opacity: 0, x: -20 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: 0.3 }}
+                            className="flex flex-col items-center gap-2"
+                          >
+                            <div className={cn(
+                              "w-14 h-14 rounded-xl flex items-center justify-center border transition-all shadow-lg",
+                              activeTunnel.status === 'deployed' ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-500" : "bg-zinc-900 border-zinc-800 text-zinc-500"
+                            )}>
+                              <Server className="w-7 h-7" />
                             </div>
-                            <span className="text-[8px] font-bold text-zinc-500 uppercase">Client</span>
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase">VPS1 Gateway</span>
+                          </motion.div>
+
+                          {/* Data Tunnel Line (Horizontal) */}
+                          <div className="absolute left-1/2 -translate-x-1/2 w-32 h-px bg-gradient-to-r from-emerald-500/50 via-emerald-500 to-emerald-500/50">
+                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-[8px] font-bold text-emerald-500 uppercase tracking-widest">WG1 Tunnel</div>
+                            <motion.div 
+                              className="absolute top-1/2 -translate-y-1/2 w-1 h-1 bg-emerald-400 rounded-full shadow-[0_0_8px_#10b981]"
+                              animate={{ left: ["0%", "100%"] }}
+                              transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
+                            />
                           </div>
-                          <div className="w-12 h-px bg-emerald-500/30 relative">
-                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-bold text-emerald-500/50">WG0</div>
-                          </div>
-                          <div className="flex flex-col items-center gap-2">
-                            <div className="w-12 h-12 bg-zinc-900 border border-zinc-700 rounded-xl flex items-center justify-center shadow-2xl">
-                              <Server className="w-6 h-6 text-emerald-500" />
+
+                          {/* VPS2 (Exit Node) */}
+                          <motion.div 
+                            initial={{ opacity: 0, x: 20 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: 0.6 }}
+                            className="flex flex-col items-center gap-2"
+                          >
+                            <div className={cn(
+                              "w-14 h-14 rounded-xl flex items-center justify-center border transition-all shadow-lg",
+                              activeTunnel.status === 'deployed' ? "bg-zinc-900 border-zinc-700 text-zinc-300" : "bg-zinc-900 border-zinc-800 text-zinc-500"
+                            )}>
+                              <Server className="w-7 h-7" />
                             </div>
-                            <span className="text-[10px] font-bold text-zinc-400">VPS1 (Gateway)</span>
+                            <span className="text-[10px] font-bold text-zinc-400 uppercase">VPS2 Exit</span>
+                          </motion.div>
+                        </div>
+
+                        {/* 3. Endpoint Layer (Clients & Internet) */}
+                        <div className="flex items-start gap-48 relative z-10">
+                          {/* Client Side */}
+                          <div className="relative flex flex-col items-center gap-2">
+                            {/* Vertical Line from VPS1 */}
+                            <div className="absolute bottom-full mb-2 w-px h-12 bg-gradient-to-t from-emerald-500/30 to-transparent" />
+                            <motion.div 
+                              initial={{ opacity: 0, scale: 0.8 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              transition={{ delay: 0.9 }}
+                              className="w-12 h-12 bg-zinc-900 border border-zinc-800 rounded-xl flex items-center justify-center text-zinc-500 shadow-xl"
+                            >
+                              <Users className="w-6 h-6" />
+                            </motion.div>
+                            <span className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest">Clients</span>
                           </div>
-                          <div className="w-12 h-px bg-emerald-500 relative">
-                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-bold text-emerald-500">WG1</div>
+
+                          {/* Internet Side */}
+                          <div className="relative flex flex-col items-center gap-2">
+                            {/* Vertical Line from VPS2 */}
+                            <div className="absolute bottom-full mb-2 w-px h-12 bg-gradient-to-t from-zinc-700 to-transparent" />
+                            <motion.div 
+                              initial={{ opacity: 0, scale: 0.8 }}
+                              animate={{ opacity: 1, scale: 1 }}
+                              transition={{ delay: 1.2 }}
+                              className="w-12 h-12 bg-zinc-900 border border-zinc-800 rounded-xl flex items-center justify-center text-zinc-600 shadow-xl"
+                            >
+                              <Globe className="w-6 h-6" />
+                            </motion.div>
+                            <span className="text-[9px] font-bold text-zinc-600 uppercase tracking-widest">Internet</span>
                           </div>
-                          <div className="flex flex-col items-center gap-2">
-                            <div className="w-12 h-12 bg-zinc-900 border border-zinc-700 rounded-xl flex items-center justify-center shadow-2xl">
-                              <Server className="w-6 h-6 text-zinc-500" />
-                            </div>
-                            <span className="text-[10px] font-bold text-zinc-400">VPS2 (Exit Node)</span>
+                        </div>
+
+                        {/* Flow Legend */}
+                        <div className="absolute bottom-4 left-4 flex items-center gap-4">
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-blue-500" />
+                            <span className="text-[8px] font-bold text-zinc-500 uppercase">Control Flow</span>
                           </div>
-                          <div className="w-12 h-px bg-zinc-700 relative">
-                            <div className="absolute -top-3 left-1/2 -translate-x-1/2 text-[6px] font-bold text-zinc-500">ETH0</div>
-                          </div>
-                          <div className="flex flex-col items-center gap-2">
-                            <div className="w-10 h-10 bg-zinc-900 border border-zinc-700 rounded-xl flex items-center justify-center shadow-2xl">
-                              <Globe className="w-5 h-5 text-zinc-600" />
-                            </div>
-                            <span className="text-[8px] font-bold text-zinc-500 uppercase">Internet</span>
+                          <div className="flex items-center gap-2">
+                            <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                            <span className="text-[8px] font-bold text-zinc-500 uppercase">Data Path</span>
                           </div>
                         </div>
                       </div>
-                      <p className="mt-4 text-[10px] text-zinc-500 text-center italic leading-relaxed">
-                        The Management Console is hosted on a <span className="text-blue-400 font-bold">dedicated, isolated infrastructure</span>, separate from the VPN tunnel nodes (VPS1 & VPS2) to prevent any single point of compromise.
+                      <p className="mt-4 text-[10px] text-zinc-500 text-center italic leading-relaxed px-6">
+                        The <span className="text-blue-400 font-bold">Management Hub</span> orchestrates the infrastructure via an out-of-band control plane, while user traffic flows through the <span className="text-emerald-500 font-bold">Double VPN Cascade</span> (VPS1 → VPS2) for maximum anonymity.
                       </p>
+                    </Card>
+
+                    <Card title="Live Peers Monitoring" icon={Users}>
+                      <div className="space-y-4">
+                        {activeTunnel.status !== 'deployed' ? (
+                          <div className="py-12 flex flex-col items-center justify-center text-center space-y-3 opacity-50">
+                            <Users className="w-12 h-12 text-zinc-700" />
+                            <p className="text-xs text-zinc-500 font-mono uppercase tracking-widest">No Active Deployment</p>
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {activeTunnel.peers.map((peer) => (
+                              <div key={peer.id} className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 hover:border-emerald-500/30 transition-all group">
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-4">
+                                    <div className="w-10 h-10 rounded-lg bg-emerald-500/10 flex items-center justify-center text-emerald-500">
+                                      {peer.name.toLowerCase().includes('phone') ? <Smartphone className="w-5 h-5" /> : <Monitor className="w-5 h-5" />}
+                                    </div>
+                                    <div>
+                                      <h4 className="text-sm font-bold text-zinc-100">{peer.name}</h4>
+                                      <p className="text-[10px] text-zinc-500 font-mono">{peer.allowedIPs}</p>
+                                    </div>
+                                  </div>
+                                  <div className="text-right">
+                                    <div className="flex items-center gap-2 justify-end">
+                                      <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                      <span className="text-[10px] font-bold text-emerald-500 uppercase">Active</span>
+                                    </div>
+                                    <p className="text-[10px] text-zinc-600 mt-1 font-mono">Last: {peer.lastHandshake}</p>
+                                  </div>
+                                </div>
+                                <div className="grid grid-cols-2 gap-4 mt-4 pt-4 border-t border-zinc-900">
+                                  <div className="flex items-center gap-2">
+                                    <ArrowRightLeft className="w-3 h-3 text-blue-500 rotate-90" />
+                                    <div className="space-y-0.5">
+                                      <p className="text-[8px] font-bold text-zinc-600 uppercase tracking-widest">Download</p>
+                                      <p className="text-xs font-mono text-zinc-300">{peer.transferRx}</p>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <ArrowRightLeft className="w-3 h-3 text-emerald-500 -rotate-90" />
+                                    <div className="space-y-0.5">
+                                      <p className="text-[8px] font-bold text-zinc-600 uppercase tracking-widest">Upload</p>
+                                      <p className="text-xs font-mono text-zinc-300">{peer.transferTx}</p>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </Card>
                   </div>
 
