@@ -38,7 +38,8 @@ import {
   Smartphone,
   ExternalLink,
   ArrowRightLeft,
-  Network
+  Network,
+  FolderOpen
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -1077,7 +1078,8 @@ pause
     vps2Ip: '',
     vps2Password: '',
     clientCount: 5,
-    clientNames: 'Client1, Client2, Client3, Client4, Client5'
+    clientNames: 'Client1, Client2, Client3, Client4, Client5',
+    setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
   });
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
@@ -2097,20 +2099,41 @@ PersistentKeepalive = 25`;
                     <div className="space-y-6">
                       <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
                         <div className="space-y-1">
-                          <label className="text-[10px] font-bold text-zinc-600 uppercase">Number of Clients to Deploy</label>
-                          <input 
-                            type="number" 
-                            value={preSetupConfig.clientCount}
-                            onChange={(e) => setPreSetupConfig({...preSetupConfig, clientCount: parseInt(e.target.value)})}
-                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
-                          />
+                          <label className="text-[10px] font-bold text-zinc-600 uppercase">Configuration File (setup.ini) Path</label>
+                          <div className="flex gap-2">
+                            <input 
+                              type="text" 
+                              value={preSetupConfig.setupIniPath}
+                              onChange={(e) => setPreSetupConfig({...preSetupConfig, setupIniPath: e.target.value})}
+                              className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500 font-mono"
+                              placeholder="C:\Path\To\setup.ini"
+                            />
+                            <button 
+                              onClick={() => alert("In the desktop version, this opens a file picker. For now, please enter the path manually.")}
+                              className="px-3 py-2 bg-zinc-800 border border-zinc-700 rounded-lg text-zinc-400 hover:text-zinc-200 transition-colors"
+                            >
+                              <FolderOpen className="w-4 h-4" />
+                            </button>
+                          </div>
+                          <p className="text-[8px] text-zinc-600 italic">The deployment tool will look for its configuration at this location.</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-zinc-600 uppercase">Number of Clients</label>
+                            <input 
+                              type="number" 
+                              value={preSetupConfig.clientCount}
+                              onChange={(e) => setPreSetupConfig({...preSetupConfig, clientCount: parseInt(e.target.value)})}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
+                            />
+                          </div>
                         </div>
                         <div className="space-y-1">
                           <label className="text-[10px] font-bold text-zinc-600 uppercase">Client Names (Comma Separated)</label>
                           <textarea 
                             value={preSetupConfig.clientNames}
                             onChange={(e) => setPreSetupConfig({...preSetupConfig, clientNames: e.target.value})}
-                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500 h-32 resize-none"
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500 h-24 resize-none"
                             placeholder="Client1, Client2, Client3..."
                           />
                         </div>
@@ -2124,7 +2147,7 @@ PersistentKeepalive = 25`;
                           <div>
                             <p className="text-xs font-bold text-zinc-200 uppercase mb-1">Automation Tip</p>
                             <p className="text-[10px] text-zinc-500 leading-relaxed">
-                              Placing this <code className="text-emerald-500">setup.ini</code> file in the same directory as the deployment tool allows for zero-touch configuration.
+                              The <code className="text-emerald-500">setup.ini</code> file at the specified path allows for zero-touch configuration during the deployment process.
                             </p>
                           </div>
                         </div>
