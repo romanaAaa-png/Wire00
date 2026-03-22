@@ -561,8 +561,20 @@ fix_docker() {
 }
 
 # 1. Update & Install
+log_step "Configuring robust DNS for installation..."
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+
 log_step "Updating system packages..."
 apt-get update || true
+
+log_step "Installing critical networking tools early..."
+# Install iptables-persistent early while network is direct
+export DEBIAN_FRONTEND=noninteractive
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
+  iptables-persistent netfilter-persistent curl iproute2 || true
 
 log_step "Checking WireGuard kernel module..."
 modprobe wireguard || true
@@ -572,7 +584,7 @@ if ! lsmod | grep -q wireguard; then
   modprobe wireguard || true
 fi
 
-log_step "Installing WireGuard, Docker, and networking tools..."
+log_step "Installing WireGuard and Docker..."
 # Remove any potential snap docker to avoid conflicts
 if command -v snap &> /dev/null; then
   snap remove docker || true
@@ -580,7 +592,7 @@ fi
 
 # Install with non-interactive flags
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  wireguard iptables docker.io docker-compose-v2 curl iproute2 || true
+  wireguard iptables docker.io docker-compose-v2 || true
 
 log_step "Starting Docker daemon..."
 systemctl unmask docker.service || true
@@ -727,10 +739,6 @@ iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE
 
 # Save rules
 log_step "Saving IPTables rules permanently..."
-export DEBIAN_FRONTEND=noninteractive
-echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
-echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
-apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iptables-persistent
 netfilter-persistent save || true
 
 # Final check for reboot requirement
