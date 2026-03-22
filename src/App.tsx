@@ -22,6 +22,7 @@ import {
   Edit2,
   Save,
   FileCode,
+  FileEdit,
   Play,
   RotateCcw,
   AlertCircle,
@@ -227,7 +228,7 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics' | 'uninstall'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   
@@ -446,8 +447,8 @@ echo "Key rotation completed at $(date)" >> /var/log/lodgeguard-sync.log
 set -e
 
 # Logging setup
-LOG_DIR="/root/VPS Installation Log"
-LOG_FILE="$LOG_DIR/installation_steps.txt"
+LOG_DIR="/root/DTLog"
+LOG_FILE="$LOG_DIR/installation.log"
 mkdir -p "$LOG_DIR"
 echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
 echo "Started at: $(date)" >> "$LOG_FILE"
@@ -514,6 +515,7 @@ cd /opt/wg-easy && docker compose up -d
 
 # 4. Setup VPS-to-VPS Tunnel (wg1)
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
+mkdir -p /etc/wireguard
 cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
 PrivateKey = __VPS1_WG1_PRIV_KEY__
@@ -531,7 +533,7 @@ systemctl start wg-quick@wg1
 
 # Output public key for the app to capture
 log_step "Capturing public key..."
-echo "publickey: $(wg pubkey < /etc/wireguard/vps1_tunnel_priv)"
+echo "publickey: __VPS1_WG1_PUB_KEY__"
 
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
 log_step "Configuring IPTables routing rules..."
@@ -601,8 +603,8 @@ echo "--- VPS1 Rollback Complete ---"
 set -e
 
 # Logging setup
-LOG_DIR="/root/VPS Installation Log"
-LOG_FILE="$LOG_DIR/installation_steps.txt"
+LOG_DIR="/root/DTLog"
+LOG_FILE="$LOG_DIR/installation.log"
 mkdir -p "$LOG_DIR"
 echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
 echo "Started at: $(date)" >> "$LOG_FILE"
@@ -720,74 +722,85 @@ echo "--- VPS2 Rollback Complete ---"
       icon: Activity,
       content: `#!/bin/bash
 # Double Tunnel - VPS Readiness Check Script
-echo "--- Double Tunnel: System Readiness Check ---"
-echo "Checking at: $(date)"
-echo ""
+# Logging setup
+LOG_DIR="/root/DTLog"
+LOG_FILE="$LOG_DIR/installation.log"
+mkdir -p "$LOG_DIR"
+echo "--- Double Tunnel: System Readiness Check ---" >> "$LOG_FILE"
+echo "Checking at: $(date)" >> "$LOG_FILE"
+
+log_msg() {
+  echo "$1" >> "$LOG_FILE"
+  echo "$1"
+}
+
+log_msg "--- Double Tunnel: System Readiness Check ---"
+log_msg "Checking at: $(date)"
 
 # 1. Check for Root Privileges
 if [ "$EUID" -ne 0 ]; then
-  echo "[ERROR] This script must be run as root. Use 'sudo su' or 'sudo bash'."
+  log_msg "[ERROR] This script must be run as root. Use 'sudo su' or 'sudo bash'."
   exit 1
 else
-  echo "[OK] Running as root."
+  log_msg "[OK] Running as root."
 fi
 
 # 2. Check OS Distribution
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   if [[ "$ID" == "ubuntu" || "$ID" == "debian" ]]; then
-    echo "[OK] OS: $PRETTY_NAME detected."
+    log_msg "[OK] OS: $PRETTY_NAME detected."
   else
-    echo "[WARN] OS: $PRETTY_NAME detected. This system is optimized for Ubuntu/Debian."
+    log_msg "[WARN] OS: $PRETTY_NAME detected. This system is optimized for Ubuntu/Debian."
   fi
 else
-  echo "[ERROR] Could not determine OS distribution."
+  log_msg "[ERROR] Could not determine OS distribution."
 fi
 
 # 3. Check Kernel Version (WireGuard requires 5.6+ or module)
 KERNEL_VER=$(uname -r)
-echo "[INFO] Kernel Version: $KERNEL_VER"
+log_msg "[INFO] Kernel Version: $KERNEL_VER"
 if [[ $(echo "$KERNEL_VER" | cut -d. -f1) -ge 5 && $(echo "$KERNEL_VER" | cut -d. -f2) -ge 6 ]]; then
-  echo "[OK] Kernel supports WireGuard natively."
+  log_msg "[OK] Kernel supports WireGuard natively."
 else
-  echo "[INFO] Kernel < 5.6. WireGuard module will be installed via DKMS."
+  log_msg "[INFO] Kernel < 5.6. WireGuard module will be installed via DKMS."
 fi
 
 # 4. Check for Required Tools
 for tool in curl iptables docker; do
   if command -v $tool >/dev/null 2>&1; then
-    echo "[OK] Tool '$tool' is already installed."
+    log_msg "[OK] Tool '$tool' is already installed."
   else
-    echo "[INFO] Tool '$tool' is missing (will be installed during setup)."
+    log_msg "[INFO] Tool '$tool' is missing (will be installed during setup)."
   fi
 done
 
 # 5. Check IP Forwarding Capability
 if [ -f /proc/sys/net/ipv4/ip_forward ]; then
-  echo "[OK] IP Forwarding is supported by the kernel."
+  log_msg "[OK] IP Forwarding is supported by the kernel."
 else
-  echo "[ERROR] IP Forwarding is NOT supported. Double VPN will not work."
+  log_msg "[ERROR] IP Forwarding is NOT supported. Double VPN will not work."
 fi
 
 # 6. Check for Port Conflicts (Standard Ports)
 for port in 22 51820 51821 51822; do
   if ss -tuln | grep -q ":$port "; then
     if [ "$port" -eq 22 ]; then
-      echo "[OK] Port 22 (SSH) is active (Required for management)."
+      log_msg "[OK] Port 22 (SSH) is active (Required for management)."
     else
-      echo "[WARN] Port $port is already in use. Setup will attempt to reassign."
+      log_msg "[WARN] Port $port is already in use. Setup will attempt to reassign."
     fi
   else
-    echo "[OK] Port $port is available."
+    log_msg "[OK] Port $port is available."
   fi
 done
 
-echo ""
-echo "--- Readiness Check Complete ---"
+log_msg ""
+log_msg "--- Readiness Check Complete ---"
 if [ "$ID" == "ubuntu" ] || [ "$ID" == "debian" ]; then
-  echo "System is READY for installation."
+  log_msg "System is READY for installation."
 else
-  echo "System may require manual adjustments for non-Debian distributions."
+  log_msg "System may require manual adjustments for non-Debian distributions."
 fi
 `
     },
@@ -798,6 +811,13 @@ fi
       icon: Trash2,
       content: `#!/bin/bash
 # Double Tunnel - Full VPS Reset Script
+# Logging setup
+LOG_DIR="/root/DTLog"
+LOG_FILE="$LOG_DIR/installation.log"
+mkdir -p "$LOG_DIR"
+echo "--- WARNING: Initiating Full System Wipe ---" >> "$LOG_FILE"
+echo "Started at: $(date)" >> "$LOG_FILE"
+
 echo "--- WARNING: Initiating Full System Wipe ---"
 set -x
 
@@ -832,6 +852,7 @@ iptables -X
 sed -i '/net.ipv4.ip_forward=1/d' /etc/sysctl.conf
 sysctl -p
 
+echo "--- Full VPS Reset Complete. System is clean. ---" >> "$LOG_FILE"
 echo "--- Full VPS Reset Complete. System is clean. ---"
 `
     },
@@ -956,6 +977,14 @@ pause
     targetVPS: 'vps1',
     description: ''
   });
+  const [preSetupConfig, setPreSetupConfig] = useState({
+    vps1Ip: '',
+    vps1Password: '',
+    vps2Ip: '',
+    vps2Password: '',
+    clientCount: 5,
+    clientNames: 'Client1, Client2, Client3, Client4, Client5'
+  });
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [isRotating, setIsRotating] = useState(false);
@@ -990,6 +1019,31 @@ pause
         setActiveTunnelId(newTunnels[0].id);
       }
     }
+  };
+
+  const downloadIni = () => {
+    const content = `[VPS1]
+IP=${preSetupConfig.vps1Ip || activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+Password=${preSetupConfig.vps1Password || activeTunnel.vps1.password || '********'}
+
+[VPS2]
+IP=${preSetupConfig.vps2Ip || activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
+Password=${preSetupConfig.vps2Password || activeTunnel.vps2.password || '********'}
+
+[WireGuard]
+ClientCount=${preSetupConfig.clientCount}
+ClientNames=${preSetupConfig.clientNames}
+`;
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'setup.ini';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    addLog("Pre-setup configuration (setup.ini) generated and downloaded.", "success");
   };
 
   const updateActiveTunnel = (updates: Partial<Tunnel>) => {
@@ -1221,6 +1275,7 @@ pause
       let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
       // Inject keys into VPS1 Setup
       vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PRIV_KEY__', d_vps1_wg1_priv);
+      vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
       vps1Setup = vps1Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
       
       const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
@@ -1669,6 +1724,7 @@ PersistentKeepalive = 25`;
 
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto scrollbar-none [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
           {[
+            { id: 'pre-setup', icon: FileEdit, label: 'Pre-Setup Config' },
             { id: 'overview', icon: Activity, label: 'Overview' },
             { id: 'peers', icon: Users, label: 'Peer Management' },
             { id: 'port-forwarding', icon: ArrowRightLeft, label: 'Port Forwarding' },
@@ -1818,6 +1874,133 @@ PersistentKeepalive = 25`;
 
         <div className="p-10 max-w-7xl mx-auto">
           <AnimatePresence mode="wait">
+            {activeTab === 'pre-setup' && (
+              <motion.div
+                key="pre-setup"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-8"
+              >
+                <div className="flex items-center justify-between mb-8">
+                  <div>
+                    <h2 className="text-2xl font-bold text-zinc-100 tracking-tight">Pre-Setup Configuration</h2>
+                    <p className="text-sm text-zinc-500">Generate an initial setup.ini file for automated deployments.</p>
+                  </div>
+                  <button 
+                    onClick={downloadIni}
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                  >
+                    <Download className="w-5 h-5" />
+                    <span>GENERATE SETUP.INI</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                  <Card title="VPS Credentials" icon={Lock}>
+                    <div className="space-y-6">
+                      <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Server className="w-4 h-4 text-emerald-500" />
+                          <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">VPS1 (Gateway)</span>
+                        </div>
+                        <div className="grid grid-cols-1 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-zinc-600 uppercase">IP Address</label>
+                            <input 
+                              type="text" 
+                              value={preSetupConfig.vps1Ip || activeTunnel.vps1.ip}
+                              onChange={(e) => setPreSetupConfig({...preSetupConfig, vps1Ip: e.target.value})}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
+                              placeholder="XXX.XXX.XXX.XXX"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-zinc-600 uppercase">Root Password</label>
+                            <input 
+                              type="password" 
+                              value={preSetupConfig.vps1Password || activeTunnel.vps1.password}
+                              onChange={(e) => setPreSetupConfig({...preSetupConfig, vps1Password: e.target.value})}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
+                              placeholder="••••••••"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
+                        <div className="flex items-center gap-2 mb-2">
+                          <Server className="w-4 h-4 text-emerald-500" />
+                          <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">VPS2 (Exit Node)</span>
+                        </div>
+                        <div className="grid grid-cols-1 gap-4">
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-zinc-600 uppercase">IP Address</label>
+                            <input 
+                              type="text" 
+                              value={preSetupConfig.vps2Ip || activeTunnel.vps2.ip}
+                              onChange={(e) => setPreSetupConfig({...preSetupConfig, vps2Ip: e.target.value})}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
+                              placeholder="XXX.XXX.XXX.XXX"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[10px] font-bold text-zinc-600 uppercase">Root Password</label>
+                            <input 
+                              type="password" 
+                              value={preSetupConfig.vps2Password || activeTunnel.vps2.password}
+                              onChange={(e) => setPreSetupConfig({...preSetupConfig, vps2Password: e.target.value})}
+                              className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
+                              placeholder="••••••••"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+
+                  <Card title="WireGuard Client Deployment" icon={Users}>
+                    <div className="space-y-6">
+                      <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold text-zinc-600 uppercase">Number of Clients to Deploy</label>
+                          <input 
+                            type="number" 
+                            value={preSetupConfig.clientCount}
+                            onChange={(e) => setPreSetupConfig({...preSetupConfig, clientCount: parseInt(e.target.value)})}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <label className="text-[10px] font-bold text-zinc-600 uppercase">Client Names (Comma Separated)</label>
+                          <textarea 
+                            value={preSetupConfig.clientNames}
+                            onChange={(e) => setPreSetupConfig({...preSetupConfig, clientNames: e.target.value})}
+                            className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-300 focus:outline-none focus:border-emerald-500 h-32 resize-none"
+                            placeholder="Client1, Client2, Client3..."
+                          />
+                        </div>
+                      </div>
+
+                      <div className="p-4 bg-emerald-500/5 border border-emerald-500/20 rounded-xl">
+                        <div className="flex gap-3">
+                          <div className="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center shrink-0">
+                            <Activity className="w-4 h-4 text-emerald-500" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-zinc-200 uppercase mb-1">Automation Tip</p>
+                            <p className="text-[10px] text-zinc-500 leading-relaxed">
+                              Placing this <code className="text-emerald-500">setup.ini</code> file in the same directory as the deployment tool allows for zero-touch configuration.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+              </motion.div>
+            )}
+
             {activeTab === 'overview' && (
               <motion.div
                 key="overview"
