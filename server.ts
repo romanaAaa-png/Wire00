@@ -47,7 +47,7 @@ async function startServer() {
           .on("close", (code: number, signal: string) => {
             console.log(`SSH Stream closed for ${host} with code ${code}`);
             conn.end();
-            sendResponse(200, { output, errorOutput, code, signal });
+            sendResponse(200, { stdout: output, stderr: errorOutput, code, signal });
           })
           .on("data", (data: Buffer) => {
             output += data.toString();

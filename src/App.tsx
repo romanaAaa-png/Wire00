@@ -464,16 +464,18 @@ export DEBIAN_FRONTEND=noninteractive
 log_step "Updating system packages..."
 apt-get update && apt-get upgrade -y
 
+log_step "Installing WireGuard, Docker, and networking tools..."
+apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
+
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
 systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
 systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
-docker stop wg-easy || true
-docker rm wg-easy || true
+if command -v docker &> /dev/null; then
+  docker stop wg-easy || true
+  docker rm wg-easy || true
+fi
 rm -rf /etc/wireguard /opt/wg-easy
-
-log_step "Installing WireGuard, Docker, and networking tools..."
-apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
@@ -484,7 +486,6 @@ sysctl -p
 log_step "Configuring WG-Easy (Client Gateway)..."
 mkdir -p /opt/wg-easy
 cat <<EOF > /opt/wg-easy/docker-compose.yml
-version: "3.8"
 services:
   wg-easy:
     environment:
@@ -534,11 +535,32 @@ echo "publickey: $(wg pubkey < /etc/wireguard/vps1_tunnel_priv)"
 
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
 log_step "Configuring IPTables routing rules..."
+# Default policy to ACCEPT to prevent lockout during transition
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+
+# Flush existing rules to start clean
+iptables -F
+iptables -t nat -F
+
+# Allow SSH (Port 22) - CRITICAL for management
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# Allow established and related connections (important for apt, curl, etc)
+iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Allow Loopback
+iptables -A INPUT -i lo -j ACCEPT
+
+# WireGuard Ports
 iptables -A INPUT -p udp --dport 51820 -j ACCEPT
 iptables -A INPUT -p udp --dport 51822 -j ACCEPT
+
+# Routing logic
 iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wg1 -j MASQUERADE
 iptables -A FORWARD -i wg0 -o wg1 -j ACCEPT
-iptables -A FORWARD -i wg1 -o wg0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # Ensure SSH remains accessible on physical interface
 iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
@@ -553,6 +575,12 @@ log_step "--- VPS1 Double VPN Setup Complete ---"
       rollbackContent: `#!/bin/bash
 # VPS1 Rollback Script
 echo "--- Initiating VPS1 Rollback ---"
+# Ensure policies are ACCEPT before flushing
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -t nat -F
+iptables -F
 systemctl stop wg-quick@wg1 || true
 systemctl disable wg-quick@wg1 || true
 cd /opt/wg-easy && docker compose down || true
@@ -635,10 +663,31 @@ echo "publickey: $PUB_KEY"
 
 # 4. EXIT NODE ROUTING (Tunnel -> Internet)
 log_step "Configuring IPTables routing rules..."
+# Default policy to ACCEPT to prevent lockout
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+
+# Flush existing rules
+iptables -F
+iptables -t nat -F
+
+# Allow SSH (Port 22) - CRITICAL
+iptables -A INPUT -p tcp --dport 22 -j ACCEPT
+
+# Allow established and related connections
+iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
+iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+# Allow Loopback
+iptables -A INPUT -i lo -j ACCEPT
+
+# WireGuard Port
 iptables -A INPUT -p udp --dport 51822 -j ACCEPT
+
+# Routing logic
 iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o eth0 -j MASQUERADE
 iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
-iptables -A FORWARD -o wg0 -i eth0 -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # Save rules
 log_step "Saving IPTables rules permanently..."
@@ -650,6 +699,12 @@ log_step "--- VPS2 Exit Node Setup Complete ---"
       rollbackContent: `#!/bin/bash
 # VPS2 Rollback Script
 echo "--- Initiating VPS2 Rollback ---"
+# Ensure policies are ACCEPT before flushing
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -t nat -F
+iptables -F
 systemctl stop wg-quick@wg0 || true
 systemctl disable wg-quick@wg0 || true
 rm -f /etc/wireguard/wg0.conf
@@ -991,18 +1046,18 @@ pause
 
       addLog(`Verifying connection to VPS1 (${activeTunnel.vps1.ip})...`, "cmd");
       const vps1Check = await sshExecute(activeTunnel.vps1, "echo 'Connection Verified'");
-      if (vps1Check.code !== 0) {
+      if (vps1Check.code !== 0 && vps1Check.code !== undefined) {
         updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
-        throw new Error(`VPS1 Connection Verification Failed: ${vps1Check.errorOutput || 'Unknown SSH Error'}`);
+        throw new Error(`VPS1 Connection Verification Failed: ${vps1Check.stderr || vps1Check.errorOutput || 'Unknown SSH Error'}`);
       }
       updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'success' } });
       addLog("VPS1 Connection Verified!", "success");
 
       addLog(`Verifying connection to VPS2 (${activeTunnel.vps2.ip})...`, "cmd");
       const vps2Check = await sshExecute(activeTunnel.vps2, "echo 'Connection Verified'");
-      if (vps2Check.code !== 0) {
+      if (vps2Check.code !== 0 && vps2Check.code !== undefined) {
         updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
-        throw new Error(`VPS2 Connection Verification Failed: ${vps2Check.errorOutput || 'Unknown SSH Error'}`);
+        throw new Error(`VPS2 Connection Verification Failed: ${vps2Check.stderr || vps2Check.errorOutput || 'Unknown SSH Error'}`);
       }
       updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'success' } });
       addLog("VPS2 Connection Verified!", "success");
@@ -1016,11 +1071,11 @@ pause
         
         addLog(`Resetting VPS1 (${activeTunnel.vps1.ip})...`, "cmd");
         const res1 = await sshExecute(activeTunnel.vps1, resetScript);
-        if (res1.code !== 0) throw new Error(`VPS1 Reset Failed: ${res1.errorOutput}`);
+        if (res1.code !== 0 && res1.code !== undefined) throw new Error(`VPS1 Reset Failed: ${res1.stderr || res1.errorOutput}`);
         
         addLog(`Resetting VPS2 (${activeTunnel.vps2.ip})...`, "cmd");
         const res2 = await sshExecute(activeTunnel.vps2, resetScript);
-        if (res2.code !== 0) throw new Error(`VPS2 Reset Failed: ${res2.errorOutput}`);
+        if (res2.code !== 0 && res2.code !== undefined) throw new Error(`VPS2 Reset Failed: ${res2.stderr || res2.errorOutput}`);
         
         addLog("Full System Reset Complete.", "success");
       }
@@ -1048,7 +1103,7 @@ pause
             // Real SSH check for port availability
             const checkCmd = `ss -tuln | grep -q ":${p.port} " && echo "occupied" || echo "free"`;
             const res = await sshExecute(activeTunnel[vpsKey], checkCmd);
-            const status = res.stdout.trim();
+            const status = (res.stdout || "").trim();
 
             if (status === 'occupied') {
               if (p.port === 22) {
@@ -1123,8 +1178,8 @@ pause
 
       const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
       
-      if (vps2Result.code !== 0) {
-        throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput}`);
+      if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
+        throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput || vps2Result.stderr}`);
       }
       
       addLog("VPS2 Setup Complete.", "success");
@@ -1141,8 +1196,8 @@ pause
       
       const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
       
-      if (vps1Result.code !== 0) {
-        throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput}`);
+      if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
+        throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput || vps1Result.stderr}`);
       }
       
       addLog("VPS1 Setup Complete.", "success");
@@ -1168,7 +1223,7 @@ pause
 
       addLog("Verifying IP forwarding...", "cmd");
       const ipForwardCheck = await sshExecute(activeTunnel.vps1, "cat /proc/sys/net/ipv4/ip_forward");
-      if (ipForwardCheck.stdout.trim() === '1') {
+      if ((ipForwardCheck.stdout || "").trim() === '1') {
         addLog("IP Forwarding is ENABLED.", "success");
       } else {
         addLog("IP Forwarding is DISABLED.", "error");
@@ -1181,10 +1236,10 @@ pause
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
       addLog("Running lodgeguard-sync.sh on VPS1...", "cmd");
       const syncRes = await sshExecute(activeTunnel.vps1, syncScript);
-      if (syncRes.code === 0) {
+      if (syncRes.code === 0 || syncRes.code === undefined) {
         addLog("All VPS WireGuard keys have been updated and synchronized.", "success");
       } else {
-        addLog(`Key synchronization failed: ${syncRes.errorOutput}`, "error");
+        addLog(`Key synchronization failed: ${syncRes.stderr || syncRes.errorOutput}`, "error");
       }
 
     } catch (error: any) {
