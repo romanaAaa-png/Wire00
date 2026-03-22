@@ -67,8 +67,7 @@
     "win": {
       "target": "nsis",
       "icon": "public/icon.png",
-      "verifyUpdateCodeSignature": false,
-      "signingHashAlgorithms": []
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
       "oneClick": true,
