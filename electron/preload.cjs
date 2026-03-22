@@ -15,5 +15,6 @@ contextBridge.exposeInMainWorld('electron', {
   },
   sshExecute: (config) => ipcRenderer.invoke('ssh-execute', config),
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
-  selectFile: () => ipcRenderer.invoke('select-file')
+  selectFile: () => ipcRenderer.invoke('select-file'),
+  fixWindowsBlocking: () => ipcRenderer.invoke('fix-windows-blocking')
 });

