@@ -500,7 +500,9 @@ wait_for_service() {
 
 # 1. Update & Install
 log_step "Updating system packages..."
-apt-get update && apt-get upgrade -y
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+apt-get update
 
 log_step "Installing WireGuard, Docker, and networking tools..."
 apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
@@ -595,6 +597,9 @@ echo "publickey: __VPS1_WG1_PUB_KEY__"
 
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
 log_step "Configuring IPTables routing rules..."
+# Use the detected primary interface
+PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+
 # Default policy to ACCEPT to prevent lockout during transition
 iptables -P INPUT ACCEPT
 iptables -P FORWARD ACCEPT
@@ -623,10 +628,12 @@ iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wg1 -j MASQUERADE
 iptables -A FORWARD -i wg0 -o wg1 -j ACCEPT
 
 # Ensure SSH remains accessible on physical interface
-iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE
 
 # Save rules
 log_step "Saving IPTables rules permanently..."
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get install -y iptables-persistent
 netfilter-persistent save
 
@@ -713,7 +720,9 @@ wait_for_service() {
 
 # 1. Update & Install
 log_step "Updating system packages..."
-apt-get update && apt-get upgrade -y
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+apt-get update
 
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
@@ -760,6 +769,9 @@ echo "publickey: $PUB_KEY"
 
 # 4. EXIT NODE ROUTING (Tunnel -> Internet)
 log_step "Configuring IPTables routing rules..."
+# Detect primary interface
+PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
+
 # Default policy to ACCEPT to prevent lockout
 iptables -P INPUT ACCEPT
 iptables -P FORWARD ACCEPT
@@ -783,11 +795,13 @@ iptables -A INPUT -i lo -j ACCEPT
 iptables -A INPUT -p udp --dport 51822 -j ACCEPT
 
 # Routing logic
-iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o eth0 -j MASQUERADE
-iptables -A FORWARD -i wg0 -o eth0 -j ACCEPT
+iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o $PRIMARY_IF -j MASQUERADE
+iptables -A FORWARD -i wg0 -o $PRIMARY_IF -j ACCEPT
 
 # Save rules
 log_step "Saving IPTables rules permanently..."
+echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get install -y iptables-persistent
 netfilter-persistent save
 
