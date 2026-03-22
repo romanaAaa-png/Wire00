@@ -838,44 +838,73 @@ echo "--- Full VPS Reset Complete. System is clean. ---"
     {
       id: 'pc-cleanup',
       title: 'Local PC Cleanup Tool (cleanup.bat)',
-      description: 'Windows Batch script to remove local WireGuard remnants, registry keys, and cached configurations.',
+      description: 'Windows Batch script to remove local Double Tunnel remnants, registry keys, and cached configurations.',
       icon: ShieldAlert,
       content: `@echo off
 title Double Tunnel - Local PC Cleanup Tool
 echo ======================================================
 echo   DOUBLE TUNNEL - LOCAL PC CLEANUP & RESET
 echo ======================================================
-echo This script will remove WireGuard configurations and registry entries.
+echo This script will remove Double Tunnel configurations, registry entries, and remnants.
 echo Run as ADMINISTRATOR for best results.
+echo.
+echo [!] WARNING: This will force remove all local data.
 echo.
 pause
 
-echo Stopping WireGuard services...
+echo.
+echo [1/5] Stopping WireGuard services...
 net stop WireGuardManager 2>nul
 net stop WireGuardTunnel 2>nul
+taskkill /f /im "Double Tunnel.exe" 2>nul
 
-echo Removing Registry Keys...
+echo.
+echo [2/5] Removing Registry Keys...
+reg delete "HKEY_LOCAL_MACHINE\SOFTWARE\Double Tunnel" /f 2>nul
+reg delete "HKEY_CURRENT_USER\Software\Double Tunnel" /f 2>nul
 reg delete "HKEY_LOCAL_MACHINE\SOFTWARE\WireGuard" /f 2>nul
 reg delete "HKEY_CURRENT_USER\Software\WireGuard" /f 2>nul
 
-echo Cleaning up configuration directories...
+echo.
+echo [3/5] Cleaning up configuration directories...
+if exist "%ProgramFiles%\Double Tunnel" (
+    echo Removing Program Files (Double Tunnel)...
+    rmdir /s /q "%ProgramFiles%\Double Tunnel"
+)
 if exist "%ProgramFiles%\WireGuard" (
-    echo Removing Program Files...
+    echo Removing Program Files (WireGuard)...
     rmdir /s /q "%ProgramFiles%\WireGuard"
 )
-
+if exist "%LOCALAPPDATA%\double-tunnel-updater" (
+    echo Removing Local AppData (Updater)...
+    rmdir /s /q "%LOCALAPPDATA%\double-tunnel-updater"
+)
+if exist "%APPDATA%\Double Tunnel" (
+    echo Removing AppData (Double Tunnel)...
+    rmdir /s /q "%APPDATA%\Double Tunnel"
+)
 if exist "%LOCALAPPDATA%\WireGuard" (
-    echo Removing Local AppData...
+    echo Removing Local AppData (WireGuard)...
     rmdir /s /q "%LOCALAPPDATA%\WireGuard"
 )
 
-echo Resetting Network Interfaces...
-netsh int ip reset
-netsh winsock reset
+echo.
+echo [4/5] Removing Desktop Shortcuts...
+if exist "%PUBLIC%\Desktop\Double Tunnel.lnk" del /f /q "%PUBLIC%\Desktop\Double Tunnel.lnk"
+if exist "%USERPROFILE%\Desktop\Double Tunnel.lnk" del /f /q "%USERPROFILE%\Desktop\Double Tunnel.lnk"
 
+echo.
+echo [5/5] Resetting Network Stack...
+netsh int ip reset >nul
+netsh winsock reset >nul
+
+echo.
 echo ======================================================
-echo   CLEANUP COMPLETE. Please restart your computer.
+echo   CLEANUP COMPLETE!
 echo ======================================================
+echo Double Tunnel has been forcefully removed from this PC.
+echo Please restart your computer to finalize the process.
+echo.
 pause
 `
     }
@@ -3171,6 +3200,21 @@ AllowedIPs = 10.8.0.0/24`}
                       <p className="text-sm text-zinc-400">
                         To uninstall the desktop application, use the standard Windows "Add or Remove Programs" utility.
                       </p>
+                      
+                      <div className="p-4 bg-red-500/5 border border-red-500/20 rounded-xl space-y-2">
+                        <div className="flex items-center gap-2 text-red-400 font-bold text-[10px] uppercase tracking-wider">
+                          <ShieldAlert className="w-3 h-3" />
+                          <span>Security Warning (Un_D.exe)</span>
+                        </div>
+                        <p className="text-[10px] text-zinc-400 leading-relaxed">
+                          Windows may block the uninstaller because it is unsigned. If you see a warning about <b>Un_D.exe</b> or an "unverified publisher":
+                        </p>
+                        <div className="flex flex-col gap-1 pl-2 border-l border-red-500/30">
+                          <span className="text-[10px] text-zinc-300">1. Click <b>"More info"</b> (Подробнее)</span>
+                          <span className="text-[10px] text-zinc-300">2. Click <b>"Run anyway"</b> (Выполнить в любом случае)</span>
+                        </div>
+                      </div>
+
                       <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-3">
                         <div className="flex items-center gap-3 text-xs text-zinc-300">
                           <div className="w-6 h-6 rounded-full bg-zinc-900 flex items-center justify-center text-zinc-500">1</div>
@@ -3185,16 +3229,19 @@ AllowedIPs = 10.8.0.0/24`}
                           <span>Click <b>Uninstall</b></span>
                         </div>
                       </div>
-                      <p className="text-[10px] text-zinc-600 italic">
-                        Default Path: C:\Program Files\Double Tunnel
-                      </p>
-                      <button 
-                        onClick={downloadCleanupTool}
-                        className="w-full py-3 bg-zinc-900 text-zinc-300 border border-zinc-800 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-500 transition-all"
-                      >
-                        <Download className="w-4 h-4" />
-                        DOWNLOAD CLEANUP.BAT (FORCE REMOVE)
-                      </button>
+                      
+                      <div className="space-y-2">
+                        <p className="text-[10px] text-zinc-500 italic">
+                          If the standard uninstaller fails, use the Force Cleanup tool:
+                        </p>
+                        <button 
+                          onClick={downloadCleanupTool}
+                          className="w-full py-3 bg-zinc-900 text-zinc-300 border border-zinc-800 rounded-xl font-bold text-xs flex items-center justify-center gap-2 hover:bg-red-500/10 hover:border-red-500/30 hover:text-red-500 transition-all"
+                        >
+                          <Download className="w-4 h-4" />
+                          DOWNLOAD FORCE_CLEANUP.BAT
+                        </button>
+                      </div>
                     </div>
                   </Card>
 
