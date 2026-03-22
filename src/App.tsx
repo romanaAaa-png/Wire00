@@ -128,7 +128,7 @@ const INITIAL_PEERS: Peer[] = [
     id: '1',
     name: 'Admin Laptop',
     publicKey: '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g=',
-    privateKey: 'aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2yZ3a4b5=',
+    privateKey: 'aB1cD2eF3gH4iJ5kL6mN7oP8qR9sT0uV1wX2yZ3a4b0=',
     allowedIPs: '10.0.0.2/32',
     lastHandshake: '2 mins ago',
     transferRx: '1.2 MB',
@@ -138,8 +138,8 @@ const INITIAL_PEERS: Peer[] = [
   {
     id: '2',
     name: 'Mobile Phone',
-    publicKey: 'pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g7h8i9j0k1l2m3=',
-    privateKey: 'xY9z0a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9=',
+    publicKey: 'pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g7h8i9j0k1l2m0=',
+    privateKey: 'xY9z0a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s0=',
     allowedIPs: '10.0.0.3/32',
     lastHandshake: '1 hour ago',
     transferRx: '5.6 MB',
@@ -291,6 +291,9 @@ export DEBIAN_FRONTEND=noninteractive
 
 # 1. Update & Install
 apt-get update && apt-get upgrade -y
+# Stop conflicting services
+systemctl stop apache2 nginx || true
+systemctl disable apache2 nginx || true
 apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
 
 # 2. Enable IP Forwarding
@@ -384,6 +387,9 @@ export DEBIAN_FRONTEND=noninteractive
 
 # 1. Update & Install
 apt-get update && apt-get upgrade -y
+# Stop conflicting services
+systemctl stop apache2 nginx || true
+systemctl disable apache2 nginx || true
 apt-get install -y wireguard iptables curl
 
 # 2. Enable IP Forwarding
@@ -523,7 +529,7 @@ echo "--- VPS2 Rollback Complete ---"
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type }] } : t));
   };
 
-  const startDeployment = async () => {
+  const startDeployment = async (isCleanInstall: boolean = false) => {
     if (!activeTunnel.vps1.password || !activeTunnel.vps2.password) {
       alert("Please provide root passwords for both servers.");
       return;
@@ -539,6 +545,14 @@ echo "--- VPS2 Rollback Complete ---"
     const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
     try {
+      if (isCleanInstall) {
+        addLog("Initiating CLEAN INSTALL: Wiping existing configurations...", "info");
+        addLog("Stopping Apache/Nginx and other conflicting services...", "cmd");
+        await sleep(1500);
+        addLog("Cleaning up /etc/wireguard/ and Docker artifacts...", "cmd");
+        await sleep(1000);
+      }
+
       // --- Port Verification Phase ---
       addLog("Starting Port Verification Phase...", "info");
       await sleep(1000);
@@ -1793,23 +1807,34 @@ PersistentKeepalive = 25`;
                           </div>
                         </div>
 
-                        <button 
-                          onClick={startDeployment}
-                          disabled={activeTunnel.status === 'deploying'}
-                          className="w-full py-4 bg-emerald-500 hover:bg-emerald-600 text-zinc-950 font-bold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/10"
-                        >
-                          {activeTunnel.status === 'deploying' ? (
-                            <>
-                              <Activity className="w-5 h-5 animate-spin" />
-                              DEPLOYING DOUBLE VPN...
-                            </>
-                          ) : (
-                            <>
-                              <Play className="w-5 h-5" />
-                              START AUTOMATED DEPLOYMENT
-                            </>
-                          )}
-                        </button>
+                        <div className="flex gap-3">
+                          <button 
+                            onClick={() => startDeployment(false)}
+                            disabled={activeTunnel.status === 'deploying'}
+                            className="flex-1 py-4 bg-emerald-500 hover:bg-emerald-600 text-zinc-950 font-bold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/10"
+                          >
+                            {activeTunnel.status === 'deploying' ? (
+                              <>
+                                <Activity className="w-5 h-5 animate-spin" />
+                                DEPLOYING...
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-5 h-5" />
+                                START DEPLOYMENT
+                              </>
+                            )}
+                          </button>
+                          <button 
+                            onClick={() => startDeployment(true)}
+                            disabled={activeTunnel.status === 'deploying'}
+                            className="px-6 py-4 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold rounded-xl border border-zinc-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                            title="Wipe existing config and perform clean install"
+                          >
+                            <RotateCcw className="w-5 h-5" />
+                            <span>WIPE & CLEAN INSTALL</span>
+                          </button>
+                        </div>
                         <p className="text-[10px] text-zinc-500 text-center italic">
                           Tip: Type "fail" in VPS1 password to test the automated rollback feature.
                         </p>
