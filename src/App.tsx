@@ -212,8 +212,49 @@ const Badge = ({ children, variant = 'default' }: { children: React.ReactNode, v
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [consoleLogs, setConsoleLogs] = useState<{type: string, message: string, timestamp: string}[]>([]);
+  const [vpsLogs, setVpsLogs] = useState<{vps: string, logs: string}[]>([]);
+  const [terminalInput, setTerminalInput] = useState('');
+  const [pasteBuffer, setPasteBuffer] = useState('');
+
+  useEffect(() => {
+    const originalLog = console.log;
+    const originalError = console.error;
+    const originalWarn = console.warn;
+
+    const captureLog = (type: string, ...args: any[]) => {
+      const message = args.map(arg => 
+        typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+      ).join(' ');
+      
+      setConsoleLogs(prev => [...prev.slice(-99), {
+        type,
+        message,
+        timestamp: new Date().toLocaleTimeString()
+      }]);
+    };
+
+    console.log = (...args) => {
+      captureLog('info', ...args);
+      originalLog.apply(console, args);
+    };
+    console.error = (...args) => {
+      captureLog('error', ...args);
+      originalError.apply(console, args);
+    };
+    console.warn = (...args) => {
+      captureLog('warn', ...args);
+      originalWarn.apply(console, args);
+    };
+
+    return () => {
+      console.log = originalLog;
+      console.error = originalError;
+      console.warn = originalWarn;
+    };
+  }, []);
 
   useEffect(() => {
     const handleResize = () => {
@@ -733,6 +774,10 @@ pause
       addLog("Checking package: iptables... [INSTALLED]", "success");
       await sleep(500);
       addLog("Checking kernel module: wireguard... [LOADED]", "success");
+      await sleep(500);
+      addLog("Executing: wg show", "cmd");
+      await sleep(800);
+      addLog("interface: wg0\n  public key: 8xJ...9zK\n  listening port: 51820", "success");
       await sleep(800);
 
       addLog("Generating keys...", "info");
@@ -775,6 +820,10 @@ pause
       addLog("Checking package: docker-compose-plugin... [INSTALLED]", "success");
       await sleep(500);
       addLog("Checking service: docker... [RUNNING]", "success");
+      await sleep(500);
+      addLog("Executing: wg show", "cmd");
+      await sleep(800);
+      addLog("interface: wg0\n  public key: 2vB...1mP\n  listening port: 51820", "success");
       await sleep(800);
 
       addLog("Configuring NAT & Double VPN Routing...", "info");
@@ -972,6 +1021,61 @@ pause
     updateActiveTunnel({ peers: activeTunnel.peers.filter(p => p.id !== id) });
   };
 
+  const collectVPSLogs = async (vpsId: 'vps1' | 'vps2') => {
+    const vpsName = vpsId === 'vps1' ? 'VPS1 (Gateway)' : 'VPS2 (Node)';
+    addLog(`Collecting diagnostic logs from ${vpsName}...`, "info");
+    
+    // Simulate fetching logs via SSH
+    const simulatedLogs = [
+      `--- System Info (${vpsName}) ---`,
+      `Uptime: ${Math.floor(Math.random() * 100)} days`,
+      `Kernel: Linux 6.1.0-18-amd64`,
+      `Memory: ${Math.floor(Math.random() * 1000)}MB / 2048MB`,
+      `\n--- WireGuard Status ---`,
+      vpsId === 'vps1' ? `interface: wg0\n  public key: ${activeTunnel.vps1.publicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps2.publicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps2.ip}:51820\n  allowed ips: 10.0.0.2/32\n  latest handshake: 5 seconds ago` : `interface: wg0\n  public key: ${activeTunnel.vps2.publicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps1.publicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps1.ip}:51820\n  allowed ips: 10.0.0.1/32\n  latest handshake: 5 seconds ago`,
+      `\n--- Firewall Rules (iptables) ---`,
+      `-A FORWARD -i wg0 -j ACCEPT`,
+      `-A FORWARD -o wg0 -j ACCEPT`,
+      `-t nat -A POSTROUTING -o eth0 -j MASQUERADE`,
+      `\n--- Recent System Logs (journalctl) ---`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] ip link add wg0 type wireguard`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] wg setconf wg0 /dev/fd/63`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] ip -4 address add 10.0.0.1/24 dev wg0`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] ip link set mtu 1420 up dev wg0`,
+    ].join('\n');
+
+    setVpsLogs(prev => {
+      const filtered = prev.filter(l => l.vps !== vpsId);
+      return [...filtered, { vps: vpsId, logs: simulatedLogs }];
+    });
+    
+    addLog(`Logs collected from ${vpsName}.`, "success");
+  };
+
+  const downloadDiagnosticBundle = () => {
+    const bundle = {
+      timestamp: new Date().toISOString(),
+      appState: {
+        tunnelStatus: activeTunnel.status,
+        vps1: { ip: activeTunnel.vps1.ip, status: activeTunnel.status === 'deployed' ? 'online' : 'offline' },
+        vps2: { ip: activeTunnel.vps2.ip, status: activeTunnel.status === 'deployed' ? 'online' : 'offline' },
+        peersCount: activeTunnel.peers.length
+      },
+      consoleLogs,
+      vpsLogs
+    };
+
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `double_tunnel_diagnostics_${new Date().getTime()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   const downloadCleanupTool = () => {
     const script = scripts.find(s => s.id === 'pc-cleanup');
     if (!script) return;
@@ -1158,6 +1262,7 @@ PersistentKeepalive = 25`;
             { id: 'config', icon: Settings, label: 'Server Config' },
             { id: 'setup', icon: Globe, label: 'Setup Guide' },
             { id: 'platforms', icon: Monitor, label: 'Cross-Platform' },
+            { id: 'diagnostics', icon: ShieldAlert, label: 'Troubleshooting' },
           ].map((item) => (
             <button
               key={item.id}
@@ -2067,6 +2172,29 @@ PersistentKeepalive = 25`;
                         </button>
                       </div>
                     </Card>
+
+                    <Card title="Paste & Send" icon={Copy}>
+                      <div className="space-y-3">
+                        <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">Quick Paste Buffer</p>
+                        <textarea 
+                          value={pasteBuffer}
+                          onChange={(e) => setPasteBuffer(e.target.value)}
+                          placeholder="Paste commands or scripts here..."
+                          className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-[10px] font-mono text-zinc-300 focus:outline-none focus:border-emerald-500/50 transition-all resize-none"
+                        />
+                        <button 
+                          onClick={() => {
+                            if (pasteBuffer.trim()) {
+                              executeCommand(pasteBuffer);
+                              setPasteBuffer('');
+                            }
+                          }}
+                          className="w-full py-2 bg-zinc-800 text-zinc-200 font-bold rounded-lg hover:bg-zinc-700 transition-all text-[10px] uppercase tracking-wider"
+                        >
+                          Send to Terminal
+                        </button>
+                      </div>
+                    </Card>
                   </div>
 
                   <div className="lg:col-span-3">
@@ -2135,20 +2263,25 @@ PersistentKeepalive = 25`;
                         <div className="flex-1 flex items-center gap-2">
                           <input 
                             type="text" 
+                            value={terminalInput}
+                            onChange={(e) => setTerminalInput(e.target.value)}
                             placeholder="Type a command (e.g. ./lodgeguard-sync.sh)..."
                             className="flex-1 bg-transparent border-none text-zinc-100 font-mono text-sm focus:outline-none"
                             onKeyDown={(e) => {
                               if (e.key === 'Enter') {
-                                executeCommand(e.currentTarget.value);
-                                e.currentTarget.value = '';
+                                executeCommand(terminalInput);
+                                setTerminalInput('');
                               }
                             }}
                           />
                           <button 
-                            onClick={() => executeCommand('./lodgeguard-sync.sh')}
+                            onClick={() => {
+                              executeCommand(terminalInput || './lodgeguard-sync.sh');
+                              setTerminalInput('');
+                            }}
                             className="px-3 py-1 bg-emerald-500/10 text-emerald-500 text-[10px] font-bold rounded border border-emerald-500/20 hover:bg-emerald-500/20 transition-all"
                           >
-                            RUN SYNC
+                            {terminalInput ? 'EXECUTE' : 'RUN SYNC'}
                           </button>
                         </div>
                       </div>
@@ -2543,6 +2676,162 @@ AllowedIPs = 10.8.0.0/24`}
                       </div>
                     </div>
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'diagnostics' && (
+              <motion.div
+                key="diagnostics"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-8"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-2xl font-bold text-white tracking-tight">Diagnostic Center</h2>
+                    <p className="text-zinc-500 text-sm">Collect and analyze logs for troubleshooting connectivity issues.</p>
+                  </div>
+                  <button 
+                    onClick={downloadDiagnosticBundle}
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                  >
+                    <Download className="w-5 h-5" />
+                    <span>DOWNLOAD DIAGNOSTIC BUNDLE</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Console Logs */}
+                  <Card title="Management Console Logs" icon={Terminal}>
+                    <div className="space-y-4">
+                      <p className="text-xs text-zinc-500">Real-time logs from this management interface (browser console).</p>
+                      <div className="bg-black rounded-xl border border-zinc-800 p-4 h-64 overflow-y-auto font-mono text-[10px] space-y-1 scrollbar-thin scrollbar-thumb-zinc-800">
+                        {consoleLogs.length === 0 && <p className="text-zinc-700 italic">No logs captured yet...</p>}
+                        {consoleLogs.map((log, i) => (
+                          <div key={i} className="flex gap-2">
+                            <span className="text-zinc-600 shrink-0">[{log.timestamp}]</span>
+                            <span className={cn(
+                              "shrink-0 uppercase font-bold",
+                              log.type === 'error' ? "text-red-500" : log.type === 'warn' ? "text-yellow-500" : "text-blue-500"
+                            )}>{log.type}:</span>
+                            <span className="text-zinc-300 break-all">{log.message}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* Mobile Client Diagnostics */}
+                  <Card title="Mobile Client Logs" icon={Smartphone}>
+                    <div className="space-y-6">
+                      <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-3">
+                        <h4 className="text-xs font-bold text-zinc-300 uppercase tracking-wider">How to export logs from Android/iOS:</h4>
+                        <ol className="text-xs text-zinc-500 space-y-2 list-decimal ml-4">
+                          <li>Open the WireGuard app on your mobile device.</li>
+                          <li>Go to <span className="text-zinc-300">Settings</span> (three dots or gear icon).</li>
+                          <li>Select <span className="text-zinc-300">View Log</span> or <span className="text-zinc-300">Export Logs</span>.</li>
+                          <li>Save the file or copy the text.</li>
+                        </ol>
+                      </div>
+                      
+                      <div className="space-y-3">
+                        <p className="text-xs text-zinc-500">Paste mobile logs here for inclusion in the diagnostic bundle:</p>
+                        <textarea 
+                          placeholder="Paste logs from mobile app here..."
+                          className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-xl p-4 text-xs font-mono text-zinc-300 focus:outline-none focus:border-emerald-500/50 transition-all resize-none"
+                        />
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* VPS Logs */}
+                  <Card title="VPS Server Logs" icon={Server}>
+                    <div className="space-y-6">
+                      <div className="grid grid-cols-2 gap-4">
+                        <button 
+                          onClick={() => collectVPSLogs('vps1')}
+                          className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl hover:bg-zinc-900 transition-all flex flex-col items-center gap-3 group"
+                        >
+                          <div className="p-2 bg-zinc-900 rounded-lg group-hover:bg-emerald-500/10 transition-colors">
+                            <Activity className="w-5 h-5 text-zinc-500 group-hover:text-emerald-500" />
+                          </div>
+                          <span className="text-[10px] font-bold text-zinc-400 uppercase">Fetch VPS1 Logs</span>
+                        </button>
+                        <button 
+                          onClick={() => collectVPSLogs('vps2')}
+                          className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl hover:bg-zinc-900 transition-all flex flex-col items-center gap-3 group"
+                        >
+                          <div className="p-2 bg-zinc-900 rounded-lg group-hover:bg-emerald-500/10 transition-colors">
+                            <Activity className="w-5 h-5 text-zinc-500 group-hover:text-emerald-500" />
+                          </div>
+                          <span className="text-[10px] font-bold text-zinc-400 uppercase">Fetch VPS2 Logs</span>
+                        </button>
+                      </div>
+
+                      <div className="space-y-4">
+                        {vpsLogs.map((log) => (
+                          <div key={log.vps} className="space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">
+                                {log.vps === 'vps1' ? 'VPS1 (Gateway)' : 'VPS2 (Node)'}
+                              </span>
+                              <button 
+                                onClick={() => setVpsLogs(prev => prev.filter(l => l.vps !== log.vps))}
+                                className="text-[10px] text-red-500 hover:underline"
+                              >
+                                CLEAR
+                              </button>
+                            </div>
+                            <div className="bg-black rounded-xl border border-zinc-800 p-4 h-48 overflow-y-auto font-mono text-[10px] text-zinc-400 whitespace-pre scrollbar-thin scrollbar-thumb-zinc-800">
+                              {log.logs}
+                            </div>
+                          </div>
+                        ))}
+                        {vpsLogs.length === 0 && (
+                          <div className="h-48 bg-zinc-950 rounded-xl border border-zinc-800 border-dashed flex items-center justify-center">
+                            <p className="text-xs text-zinc-600 italic">No server logs collected yet.</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </Card>
+
+                  {/* Common Issues */}
+                  <Card title="Quick Troubleshooting Guide" icon={ShieldAlert}>
+                    <div className="space-y-4">
+                      <div className="space-y-3">
+                        <div className="p-3 bg-red-500/5 border border-red-500/10 rounded-lg">
+                          <h4 className="text-xs font-bold text-red-400 mb-1 flex items-center gap-2">
+                            <AlertCircle className="w-3 h-3" />
+                            Handshake Failure
+                          </h4>
+                          <p className="text-[10px] text-zinc-500 leading-relaxed">
+                            If you see "Handshake did not complete" in mobile logs, check if UDP port 51820 is open on VPS1 firewall and if the Endpoint IP is correct.
+                          </p>
+                        </div>
+                        <div className="p-3 bg-yellow-500/5 border border-yellow-500/10 rounded-lg">
+                          <h4 className="text-xs font-bold text-yellow-400 mb-1 flex items-center gap-2">
+                            <AlertTriangle className="w-3 h-3" />
+                            Connected but no Internet
+                          </h4>
+                          <p className="text-[10px] text-zinc-500 leading-relaxed">
+                            Check IP forwarding on both servers: <code className="text-zinc-400">sysctl net.ipv4.ip_forward</code>. Ensure VPS2 has MASQUERADE rules active.
+                          </p>
+                        </div>
+                        <div className="p-3 bg-blue-500/5 border border-blue-500/10 rounded-lg">
+                          <h4 className="text-xs font-bold text-blue-400 mb-1 flex items-center gap-2">
+                            <Activity className="w-3 h-3" />
+                            High Latency
+                          </h4>
+                          <p className="text-[10px] text-zinc-500 leading-relaxed">
+                            Double VPN naturally adds latency. Ensure both VPS are in the same region or geographically close to minimize overhead.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </Card>
                 </div>
               </motion.div>
             )}
