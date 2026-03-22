@@ -419,20 +419,24 @@ export default function App() {
 # This script runs on VPS1 (Gateway) and communicates with VPS2 (Node)
 set -e
 
-# 1. Generate New Ephemeral Keys
+# 1. Ensure SSH Key exists for communication
+if [ ! -f /root/.ssh/id_rsa ]; then
+    echo "Generating SSH key for VPS1 -> VPS2 communication..."
+    ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
+fi
+
+# 2. Generate New Ephemeral Keys
 NEW_PRIV=$(wg genkey)
 NEW_PUB=$(echo "$NEW_PRIV" | wg pubkey)
 
-# 2. Exchange Keys with VPS2
-# We use the existing secure tunnel (10.8.0.254) to push the new public key
+# 3. Exchange Keys with VPS2
+# We use the existing secure tunnel (10.9.0.254) to push the new public key
 echo "Sending new public key to VPS2..."
-ssh -i /root/.ssh/id_rsa root@10.8.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"
+# Note: The app should have added VPS1's public key to VPS2's authorized_keys during setup
+ssh -o StrictHostKeyChecking=no root@10.9.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"
 
-# 3. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
+# 4. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
 sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
-
-# 4. Trigger VPS2 to Rotate its own keys
-ssh -i /root/.ssh/id_rsa root@10.8.0.254 "/usr/local/bin/vps2-rotate.sh"
 
 # 5. Reload WireGuard
 systemctl restart wg-quick@wg1
@@ -613,7 +617,9 @@ rm -rf /etc/wireguard /opt/wg-easy || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
-echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
+sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+sysctl -w net.ipv4.ip_forward=1 || true
 sysctl -p || true
 
 # 3. Setup WG-Easy (Client Gateway on wg0)
@@ -683,8 +689,12 @@ MTU = 1280
 # Ensures all traffic originating from or arriving at the physical IP bypasses the WG tunnel
 PostUp = ip rule add from $PRIMARY_IP lookup main || true
 PostUp = ip rule add iif $PRIMARY_IF lookup main || true
+PostUp = iptables -A INPUT -i wg1 -j ACCEPT || true
+PostUp = iptables -A FORWARD -i wg1 -j ACCEPT || true
 PreDown = ip rule del from $PRIMARY_IP lookup main || true
 PreDown = ip rule del iif $PRIMARY_IF lookup main || true
+PreDown = iptables -D INPUT -i wg1 -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg1 -j ACCEPT || true
 
 [Peer]
 PublicKey = __VPS2_WG0_PUB_KEY__
@@ -853,7 +863,9 @@ apt-get install -y wireguard iptables curl iproute2 || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
-echo "net.ipv4.ip_forward=1" | tee -a /etc/sysctl.conf
+sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
+echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+sysctl -w net.ipv4.ip_forward=1 || true
 sysctl -p || true
 
 # 3. Setup WireGuard (wg0)
@@ -871,6 +883,10 @@ PrivateKey = $PRIV_KEY
 Address = 10.9.0.254/24
 ListenPort = 51822
 MTU = 1280
+PostUp = iptables -A INPUT -i wg0 -j ACCEPT || true
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT || true
+PreDown = iptables -D INPUT -i wg0 -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
 
 [Peer]
 PublicKey = __VPS1_WG1_PUB_KEY__
@@ -1572,6 +1588,11 @@ ClientNames=${preSetupConfig.clientNames}
         const confCheck = await sshExecute(vps, `ls /etc/wireguard/${iface}.conf`);
         if (confCheck.code !== 0) return false;
       }
+
+      // Check IP forwarding
+      const forwardCheck = await sshExecute(vps, `cat /proc/sys/net/ipv4/ip_forward`);
+      if (forwardCheck.stdout.trim() !== '1') return false;
+
       return true;
     } catch (e) {
       return false;
@@ -1837,6 +1858,23 @@ ClientNames=${preSetupConfig.clientNames}
 
       // --- Post-Deployment Key Update Phase ---
       addLog("Initiating Post-Deployment Key Update & Sync...", "info");
+      
+      // 1. Setup SSH Key on VPS1 and add to VPS2 for sync script
+      addLog("Configuring SSH access from VPS1 to VPS2 for automated sync...", "info");
+      const sshSetupCmd = `
+        if [ ! -f /root/.ssh/id_rsa ]; then
+          ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
+        fi
+        cat /root/.ssh/id_rsa.pub
+      `;
+      const vps1PubKeyRes = await sshExecute(activeTunnel.vps1, sshSetupCmd);
+      const vps1PubKey = vps1PubKeyRes.stdout.trim();
+      
+      if (vps1PubKey) {
+        addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd");
+        await sshExecute(activeTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
+      }
+
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
       addLog("Running lodgeguard-sync.sh on VPS1...", "cmd");
       const syncRes = await sshExecute(activeTunnel.vps1, syncScript);
