@@ -23,6 +23,7 @@ import {
   RotateCcw,
   AlertCircle,
   AlertTriangle,
+  ShieldAlert,
   Database,
   ChevronRight,
   ChevronLeft,
@@ -291,9 +292,13 @@ export DEBIAN_FRONTEND=noninteractive
 
 # 1. Update & Install
 apt-get update && apt-get upgrade -y
-# Stop conflicting services
-systemctl stop apache2 nginx || true
-systemctl disable apache2 nginx || true
+# Stop and remove previous versions
+echo "Cleaning up previous installations..."
+systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
+systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
+docker stop wg-easy || true
+docker rm wg-easy || true
+rm -rf /etc/wireguard /opt/wg-easy
 apt-get install -y wireguard iptables docker.io docker-compose-v2 curl
 
 # 2. Enable IP Forwarding
@@ -387,9 +392,11 @@ export DEBIAN_FRONTEND=noninteractive
 
 # 1. Update & Install
 apt-get update && apt-get upgrade -y
-# Stop conflicting services
-systemctl stop apache2 nginx || true
-systemctl disable apache2 nginx || true
+# Stop and remove previous versions
+echo "Cleaning up previous installations..."
+systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
+systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
+rm -rf /etc/wireguard
 apt-get install -y wireguard iptables curl
 
 # 2. Enable IP Forwarding
@@ -435,6 +442,94 @@ rm -f /etc/wireguard/wg0.conf
 iptables -t nat -F
 iptables -F
 echo "--- VPS2 Rollback Complete ---"
+`
+    },
+    {
+      id: 'full-wipe',
+      title: 'VPS Full System Reset (vps-reset.sh)',
+      description: 'Aggressively removes all WireGuard, Docker, and networking configurations. Restores VPS to a clean state.',
+      icon: Trash2,
+      content: `#!/bin/bash
+# Double Tunnel - Full VPS Reset Script
+echo "--- WARNING: Initiating Full System Wipe ---"
+set -x
+
+# 1. Stop all services
+systemctl stop wg-quick@wg0 || true
+systemctl stop wg-quick@wg1 || true
+docker stop wg-easy || true
+docker rm wg-easy || true
+
+# 2. Purge packages
+export DEBIAN_FRONTEND=noninteractive
+apt-get purge -y wireguard wireguard-tools docker.io docker-compose-v2 iptables-persistent
+apt-get autoremove -y
+apt-get clean
+
+# 3. Remove configurations
+rm -rf /etc/wireguard
+rm -rf /opt/wg-easy
+rm -rf /var/lib/docker
+rm -rf /etc/docker
+
+# 4. Reset Networking (Iptables)
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+iptables -t nat -F
+iptables -t mangle -F
+iptables -F
+iptables -X
+
+# 5. Restore sysctl
+sed -i '/net.ipv4.ip_forward=1/d' /etc/sysctl.conf
+sysctl -p
+
+echo "--- Full VPS Reset Complete. System is clean. ---"
+`
+    },
+    {
+      id: 'pc-cleanup',
+      title: 'Local PC Cleanup Tool (cleanup.bat)',
+      description: 'Windows Batch script to remove local WireGuard remnants, registry keys, and cached configurations.',
+      icon: ShieldAlert,
+      content: `@echo off
+title Double Tunnel - Local PC Cleanup Tool
+echo ======================================================
+echo   DOUBLE TUNNEL - LOCAL PC CLEANUP & RESET
+echo ======================================================
+echo This script will remove WireGuard configurations and registry entries.
+echo Run as ADMINISTRATOR for best results.
+echo.
+pause
+
+echo Stopping WireGuard services...
+net stop WireGuardManager 2>nul
+net stop WireGuardTunnel 2>nul
+
+echo Removing Registry Keys...
+reg delete "HKEY_LOCAL_MACHINE\SOFTWARE\WireGuard" /f 2>nul
+reg delete "HKEY_CURRENT_USER\Software\WireGuard" /f 2>nul
+
+echo Cleaning up configuration directories...
+if exist "%ProgramFiles%\WireGuard" (
+    echo Removing Program Files...
+    rmdir /s /q "%ProgramFiles%\WireGuard"
+)
+
+if exist "%LOCALAPPDATA%\WireGuard" (
+    echo Removing Local AppData...
+    rmdir /s /q "%LOCALAPPDATA%\WireGuard"
+)
+
+echo Resetting Network Interfaces...
+netsh int ip reset
+netsh winsock reset
+
+echo ======================================================
+echo   CLEANUP COMPLETE. Please restart your computer.
+echo ======================================================
+pause
 `
     }
   ];
@@ -546,10 +641,10 @@ echo "--- VPS2 Rollback Complete ---"
 
     try {
       if (isCleanInstall) {
-        addLog("Initiating CLEAN INSTALL: Wiping existing configurations...", "info");
-        addLog("Stopping Apache/Nginx and other conflicting services...", "cmd");
+        addLog("Initiating FULL SYSTEM RESET: Purging all previous versions...", "info");
+        addLog("Removing WireGuard, Docker, and all configuration files...", "cmd");
         await sleep(1500);
-        addLog("Cleaning up /etc/wireguard/ and Docker artifacts...", "cmd");
+        addLog("Restoring networking state and clearing registry-equivalent configs...", "cmd");
         await sleep(1000);
       }
 
@@ -875,6 +970,21 @@ echo "--- VPS2 Rollback Complete ---"
 
   const deletePeer = (id: string) => {
     updateActiveTunnel({ peers: activeTunnel.peers.filter(p => p.id !== id) });
+  };
+
+  const downloadCleanupTool = () => {
+    const script = scripts.find(s => s.id === 'pc-cleanup');
+    if (!script) return;
+    
+    const blob = new Blob([script.content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `double_tunnel_pc_cleanup.bat`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   const downloadConfig = (peer: Peer) => {
@@ -2060,13 +2170,23 @@ PersistentKeepalive = 25`;
                     <h2 className="text-2xl font-bold text-zinc-100 tracking-tight">Peer Management</h2>
                     <p className="text-sm text-zinc-500">Manage users and devices connected to VPS1 Gateway for {activeTunnel.name}.</p>
                   </div>
-                  <button 
-                    onClick={() => setShowAddPeer(true)}
-                    className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
-                  >
-                    <Plus className="w-5 h-5" />
-                    <span>ADD NEW PEER</span>
-                  </button>
+                  <div className="flex gap-3">
+                    <button 
+                      onClick={downloadCleanupTool}
+                      className="flex items-center gap-2 px-6 py-3 bg-zinc-800 text-zinc-200 font-bold rounded-xl hover:bg-zinc-700 transition-all border border-zinc-700"
+                      title="Download Windows Cleanup Script to remove local WireGuard remnants"
+                    >
+                      <ShieldAlert className="w-5 h-5" />
+                      <span>PC CLEANUP TOOL</span>
+                    </button>
+                    <button 
+                      onClick={() => setShowAddPeer(true)}
+                      className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                    >
+                      <Plus className="w-5 h-5" />
+                      <span>ADD NEW PEER</span>
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 gap-4">
@@ -2354,6 +2474,49 @@ AllowedIPs = 10.8.0.0/24`}
                         <Download className="w-4 h-4" />
                         Download .APK
                       </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-red-500/5 rounded-2xl border border-red-500/20 p-8">
+                  <div className="flex items-start gap-4">
+                    <div className="p-3 bg-red-500/10 rounded-xl">
+                      <Trash2 className="w-6 h-6 text-red-500" />
+                    </div>
+                    <div>
+                      <h4 className="text-white font-bold mb-2">System Reset & Cleanup</h4>
+                      <p className="text-zinc-500 text-sm mb-6 max-w-2xl">
+                        Completely remove all traces of Double Tunnel from your local PC and remote servers. This will restore all systems to their previous state.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <button 
+                          onClick={downloadCleanupTool}
+                          className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 hover:border-red-500/50 transition-all text-left group"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-[10px] text-zinc-500 uppercase font-mono">Local PC Cleanup</p>
+                            <Download className="w-3 h-3 text-zinc-600 group-hover:text-red-500" />
+                          </div>
+                          <p className="text-xs text-zinc-300 font-bold mb-1">Download cleanup.bat</p>
+                          <p className="text-[10px] text-zinc-600">Removes Windows registry keys, .ini files, and WireGuard remnants.</p>
+                        </button>
+                        <button 
+                          onClick={() => {
+                            if(confirm("This will clear all local application data and reset the console. Continue?")) {
+                              localStorage.clear();
+                              window.location.reload();
+                            }
+                          }}
+                          className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 hover:border-red-500/50 transition-all text-left group"
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-[10px] text-zinc-500 uppercase font-mono">Console Reset</p>
+                            <RotateCcw className="w-3 h-3 text-zinc-600 group-hover:text-red-500" />
+                          </div>
+                          <p className="text-xs text-zinc-300 font-bold mb-1">Reset App State</p>
+                          <p className="text-[10px] text-zinc-600">Clears browser cache, saved passwords, and deployment logs.</p>
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
