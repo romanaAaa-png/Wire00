@@ -1466,7 +1466,12 @@ ClientNames=${preSetupConfig.clientNames}
         if (result.error) {
           throw new Error(result.error);
         }
-        return result;
+        return {
+          stdout: result.stdout || "",
+          stderr: result.stderr || "",
+          errorOutput: result.errorOutput || result.stderr || "",
+          code: result.code ?? 0
+        };
       }
 
       // Fallback to fetch (for development/web)
@@ -1492,7 +1497,13 @@ ClientNames=${preSetupConfig.clientNames}
         throw new Error(errorMessage);
       }
       
-      return await response.json();
+      const data = await response.json();
+      return {
+        stdout: data.stdout || "",
+        stderr: data.stderr || "",
+        errorOutput: data.errorOutput || data.stderr || "",
+        code: data.code ?? 0
+      };
     } catch (error: any) {
       console.error(`SSH Fetch Error for ${vps.ip}:`, error);
       if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
@@ -1536,6 +1547,36 @@ ClientNames=${preSetupConfig.clientNames}
     }
     
     addLog(`${vpsName} is back online. Resuming deployment...`, "success");
+  };
+
+  const isVpsDeployed = async (vps: VPSConfig, interfaces: string[]) => {
+    try {
+      for (const iface of interfaces) {
+        // Check if interface exists and is a WireGuard interface
+        const wgShow = await sshExecute(vps, `wg show ${iface}`);
+        if (wgShow.code !== 0) return false;
+        
+        // Check if service is active
+        const serviceCheck = await sshExecute(vps, `systemctl is-active wg-quick@${iface}`);
+        if (serviceCheck.stdout.trim() !== 'active') return false;
+
+        // Check if config file exists
+        const confCheck = await sshExecute(vps, `ls /etc/wireguard/${iface}.conf`);
+        if (confCheck.code !== 0) return false;
+      }
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const getVpsPublicKey = async (vps: VPSConfig, iface: string) => {
+    try {
+      const res = await sshExecute(vps, `wg show ${iface} public-key`);
+      return res.stdout.trim();
+    } catch (e) {
+      return "";
+    }
   };
 
   const startDeployment = async (isCleanInstall: boolean = false) => {
@@ -1658,83 +1699,105 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Port Verification Complete. Proceeding with deployment...", "success");
 
       // --- Key Generation Phase ---
-      addLog("Generating secure WireGuard keys for all nodes...", "info");
-      const d_vps1_wg0_priv = generateWGKey();
-      const d_vps1_wg0_pub = generateWGKey(); 
-      const d_vps1_wg1_priv = generateWGKey();
-      const d_vps1_wg1_pub = generateWGKey();
-      
-      const d_vps2_wg0_priv = generateWGKey();
-      const d_vps2_wg0_pub = generateWGKey();
+      addLog("Preparing WireGuard keys...", "info");
+      let d_vps1_wg0_priv = generateWGKey();
+      let d_vps1_wg0_pub = generateWGKey(); 
+      let d_vps1_wg1_priv = generateWGKey();
+      let d_vps1_wg1_pub = generateWGKey();
+      let d_vps2_wg0_priv = generateWGKey();
+      let d_vps2_wg0_pub = generateWGKey();
 
-      updateActiveTunnel({
-        vps1: {
-          ...activeTunnel.vps1,
-          wg0PrivateKey: d_vps1_wg0_priv,
-          wg0PublicKey: d_vps1_wg0_pub,
-          wg1PrivateKey: d_vps1_wg1_priv,
-          wg1PublicKey: d_vps1_wg1_pub,
-        },
+      // --- VPS2 Deployment ---
+      addLog("Checking if VPS2 (Exit Node) is already deployed...", "info");
+      const vps2AlreadyDeployed = await isVpsDeployed(activeTunnel.vps2, ['wg0']);
+      
+      if (vps2AlreadyDeployed && !isCleanInstall) {
+        addLog("VPS2 (Exit Node) is already deployed and active. Fetching existing keys...", "success");
+        const existingPub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+        if (existingPub) {
+          d_vps2_wg0_pub = existingPub;
+          addLog(`Existing VPS2 PubKey recovered: ${existingPub.substring(0, 10)}...`, "info");
+        }
+      } else {
+        if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS2...", "info");
+        addLog("Initiating deployment for VPS2 (Exit Node)...", "info");
+        addLog(`Connecting to ${activeTunnel.vps2.ip} via SSH...`, "cmd");
+        
+        let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
+        // Inject keys into VPS2 Setup
+        vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PRIV_KEY__', d_vps2_wg0_priv);
+        vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
+        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
+
+        const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
+        
+        if ((vps2Result?.stdout || "").includes("REBOOT_REQUIRED")) {
+          await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
+          addLog("Retrying VPS2 setup after reboot...", "info");
+          const retryResult = await sshExecute(activeTunnel.vps2, vps2Setup);
+          if (retryResult.code !== 0 && retryResult.code !== undefined) {
+            throw new Error(`VPS2 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
+          }
+        } else if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
+          throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput || vps2Result.stderr}`);
+        }
+        addLog("VPS2 Setup Complete.", "success");
+      }
+      
+      updateActiveTunnel({ 
+        step: 1,
         vps2: {
           ...activeTunnel.vps2,
-          wg0PrivateKey: d_vps2_wg0_priv,
-          wg0PublicKey: d_vps2_wg0_pub,
+          wg0PublicKey: d_vps2_wg0_pub
         }
       });
 
-      // --- VPS2 Deployment ---
-      addLog("Initiating deployment for VPS2 (Exit Node)...", "info");
-      addLog(`Connecting to ${activeTunnel.vps2.ip} via SSH...`, "cmd");
-      
-      let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
-      // Inject keys into VPS2 Setup
-      vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PRIV_KEY__', d_vps2_wg0_priv);
-      vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
-      vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
-
-      const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
-      
-      if (vps2Result.stdout.includes("REBOOT_REQUIRED")) {
-        await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
-        // Retry setup after reboot
-        addLog("Retrying VPS2 setup after reboot...", "info");
-        const retryResult = await sshExecute(activeTunnel.vps2, vps2Setup);
-        if (retryResult.code !== 0 && retryResult.code !== undefined) {
-          throw new Error(`VPS2 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
-        }
-      } else if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
-        throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput || vps2Result.stderr}`);
-      }
-      
-      addLog("VPS2 Setup Complete.", "success");
-      updateActiveTunnel({ step: 1 });
-
       // --- VPS1 Deployment ---
-      addLog("Initiating deployment for VPS1 (Gateway)...", "info");
-      addLog(`Connecting to ${activeTunnel.vps1.ip} via SSH...`, "cmd");
+      addLog("Checking if VPS1 (Gateway) is already deployed...", "info");
+      const vps1AlreadyDeployed = await isVpsDeployed(activeTunnel.vps1, ['wg0', 'wg1']);
 
-      let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
-      // Inject keys into VPS1 Setup
-      vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PRIV_KEY__', d_vps1_wg1_priv);
-      vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
-      vps1Setup = vps1Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
-      
-      const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
-      
-      if (vps1Result.stdout.includes("REBOOT_REQUIRED")) {
-        await rebootVpsAndWait(activeTunnel.vps1, "VPS1 (Gateway)");
-        // Retry setup after reboot
-        addLog("Retrying VPS1 setup after reboot...", "info");
-        const retryResult = await sshExecute(activeTunnel.vps1, vps1Setup);
-        if (retryResult.code !== 0 && retryResult.code !== undefined) {
-          throw new Error(`VPS1 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
+      if (vps1AlreadyDeployed && !isCleanInstall) {
+        addLog("VPS1 (Gateway) is already deployed and active. Fetching existing keys...", "success");
+        const existingPub1 = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
+        if (existingPub1) {
+          d_vps1_wg1_pub = existingPub1;
+          addLog(`Existing VPS1 PubKey recovered: ${existingPub1.substring(0, 10)}...`, "info");
         }
-      } else if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
-        throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput || vps1Result.stderr}`);
+      } else {
+        if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS1...", "info");
+        addLog("Initiating deployment for VPS1 (Gateway)...", "info");
+        addLog(`Connecting to ${activeTunnel.vps1.ip} via SSH...`, "cmd");
+
+        let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
+        // Inject keys into VPS1 Setup
+        vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PRIV_KEY__', d_vps1_wg1_priv);
+        vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
+        vps1Setup = vps1Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
+        
+        const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
+        
+        if ((vps1Result?.stdout || "").includes("REBOOT_REQUIRED")) {
+          await rebootVpsAndWait(activeTunnel.vps1, "VPS1 (Gateway)");
+          addLog("Retrying VPS1 setup after reboot...", "info");
+          const retryResult = await sshExecute(activeTunnel.vps1, vps1Setup);
+          if (retryResult.code !== 0 && retryResult.code !== undefined) {
+            throw new Error(`VPS1 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
+          }
+        } else if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
+          throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput || vps1Result.stderr}`);
+        }
+        addLog("VPS1 Setup Complete.", "success");
       }
       
-      addLog("VPS1 Setup Complete.", "success");
-      updateActiveTunnel({ step: 2, status: 'deployed' });
+      updateActiveTunnel({ 
+        step: 2, 
+        status: 'deployed',
+        vps1: {
+          ...activeTunnel.vps1,
+          wg0PublicKey: d_vps1_wg0_pub,
+          wg1PublicKey: d_vps1_wg1_pub
+        }
+      });
 
       addLog("Final system verification...", "info");
       
