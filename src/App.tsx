@@ -69,6 +69,7 @@ interface VPSConfig {
   wg0PrivateKey?: string;
   wg1PublicKey?: string;
   wg1PrivateKey?: string;
+  connectionStatus?: 'idle' | 'testing' | 'success' | 'error';
 }
 
 interface SSHKey {
@@ -938,6 +939,34 @@ pause
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
 
     try {
+      // --- Pre-Deployment Connection Verification ---
+      addLog("Phase 0: Pre-Deployment Connection Verification...", "info");
+      
+      updateActiveTunnel({ 
+        vps1: { ...activeTunnel.vps1, connectionStatus: 'testing' },
+        vps2: { ...activeTunnel.vps2, connectionStatus: 'testing' }
+      });
+
+      addLog(`Verifying connection to VPS1 (${activeTunnel.vps1.ip})...`, "cmd");
+      const vps1Check = await sshExecute(activeTunnel.vps1, "echo 'Connection Verified'");
+      if (vps1Check.code !== 0) {
+        updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
+        throw new Error(`VPS1 Connection Verification Failed: ${vps1Check.errorOutput || 'Unknown SSH Error'}`);
+      }
+      updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'success' } });
+      addLog("VPS1 Connection Verified!", "success");
+
+      addLog(`Verifying connection to VPS2 (${activeTunnel.vps2.ip})...`, "cmd");
+      const vps2Check = await sshExecute(activeTunnel.vps2, "echo 'Connection Verified'");
+      if (vps2Check.code !== 0) {
+        updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
+        throw new Error(`VPS2 Connection Verification Failed: ${vps2Check.errorOutput || 'Unknown SSH Error'}`);
+      }
+      updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'success' } });
+      addLog("VPS2 Connection Verified!", "success");
+
+      addLog("All connections verified. Proceeding with deployment.", "success");
+
       if (isCleanInstall) {
         addLog("Initiating FULL SYSTEM RESET: Purging all previous versions...", "info");
         
@@ -2245,20 +2274,33 @@ PersistentKeepalive = 25`;
                             <button 
                               onClick={async () => {
                                 try {
+                                  updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'testing' } });
                                   addLog(`Testing connection to VPS1 (${activeTunnel.vps1.ip})...`, "info");
                                   const res = await sshExecute(activeTunnel.vps1, "echo 'Connection Successful'");
                                   if (res.code === 0) {
+                                    updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'success' } });
                                     addLog("VPS1 Connection Successful!", "success");
                                   } else {
+                                    updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
                                     addLog(`VPS1 Connection Failed: ${res.errorOutput}`, "error");
                                   }
                                 } catch (err: any) {
+                                  updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
                                   addLog(`VPS1 Connection Error: ${err.message}`, "error");
                                 }
                               }}
-                              className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-wider px-2 py-1 rounded border border-emerald-500/30 hover:bg-emerald-500/10 transition-all"
+                              className={cn(
+                                "text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border transition-all flex items-center gap-1",
+                                activeTunnel.vps1.connectionStatus === 'success' ? "text-emerald-500 border-emerald-500/30 bg-emerald-500/10" :
+                                activeTunnel.vps1.connectionStatus === 'error' ? "text-red-500 border-red-500/30 bg-red-500/10" :
+                                activeTunnel.vps1.connectionStatus === 'testing' ? "text-amber-500 border-amber-500/30 bg-amber-500/10" :
+                                "text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/10"
+                              )}
                             >
-                              Test Connection
+                              {activeTunnel.vps1.connectionStatus === 'testing' && <Activity className="w-3 h-3 animate-spin" />}
+                              {activeTunnel.vps1.connectionStatus === 'success' && <Check className="w-3 h-3" />}
+                              {activeTunnel.vps1.connectionStatus === 'error' && <AlertCircle className="w-3 h-3" />}
+                              {activeTunnel.vps1.connectionStatus === 'testing' ? "Testing..." : "Test Connection"}
                             </button>
                           </div>
                           <div className="grid grid-cols-2 gap-4">
@@ -2317,20 +2359,33 @@ PersistentKeepalive = 25`;
                             <button 
                               onClick={async () => {
                                 try {
+                                  updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'testing' } });
                                   addLog(`Testing connection to VPS2 (${activeTunnel.vps2.ip})...`, "info");
                                   const res = await sshExecute(activeTunnel.vps2, "echo 'Connection Successful'");
                                   if (res.code === 0) {
+                                    updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'success' } });
                                     addLog("VPS2 Connection Successful!", "success");
                                   } else {
+                                    updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
                                     addLog(`VPS2 Connection Failed: ${res.errorOutput}`, "error");
                                   }
                                 } catch (err: any) {
+                                  updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
                                   addLog(`VPS2 Connection Error: ${err.message}`, "error");
                                 }
                               }}
-                              className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-wider px-2 py-1 rounded border border-emerald-500/30 hover:bg-emerald-500/10 transition-all"
+                              className={cn(
+                                "text-[10px] font-bold uppercase tracking-wider px-2 py-1 rounded border transition-all flex items-center gap-1",
+                                activeTunnel.vps2.connectionStatus === 'success' ? "text-emerald-500 border-emerald-500/30 bg-emerald-500/10" :
+                                activeTunnel.vps2.connectionStatus === 'error' ? "text-red-500 border-red-500/30 bg-red-500/10" :
+                                activeTunnel.vps2.connectionStatus === 'testing' ? "text-amber-500 border-amber-500/30 bg-amber-500/10" :
+                                "text-emerald-500 border-emerald-500/30 hover:bg-emerald-500/10"
+                              )}
                             >
-                              Test Connection
+                              {activeTunnel.vps2.connectionStatus === 'testing' && <Activity className="w-3 h-3 animate-spin" />}
+                              {activeTunnel.vps2.connectionStatus === 'success' && <Check className="w-3 h-3" />}
+                              {activeTunnel.vps2.connectionStatus === 'error' && <AlertCircle className="w-3 h-3" />}
+                              {activeTunnel.vps2.connectionStatus === 'testing' ? "Testing..." : "Test Connection"}
                             </button>
                           </div>
                           <div className="grid grid-cols-2 gap-4">
