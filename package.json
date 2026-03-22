@@ -14,7 +14,7 @@
     "lint": "tsc --noEmit",
     "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron electron/main.cjs\"",
     "electron:build": "npm run build && electron-builder build --win",
-    "android:init": "cap init \"Double Tunnel\" com.doubletunnel.manager --web-dir dist",
+    "android:init": "cap init \"Double Tunnel VPN\" com.doubletunnel.manager --web-dir dist",
     "android:add": "cap add android",
     "android:sync": "npm run build && cap sync android",
     "android:open": "cap open android"
@@ -56,7 +56,7 @@
   },
   "build": {
     "appId": "com.doubletunnel.manager",
-    "productName": "Double Tunnel",
+    "productName": "Double Tunnel VPN",
     "directories": {
       "output": "dist-electron"
     },
@@ -70,9 +70,10 @@
       "verifyUpdateCodeSignature": false
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName} Setup ${version}.${ext}"
     }
   }
 }

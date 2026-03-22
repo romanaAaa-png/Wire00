@@ -11,8 +11,8 @@ function createWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.cjs')
     },
-    title: "Double VPN Manager",
-    icon: path.join(__dirname, '../public/favicon.ico')
+    title: "Double Tunnel VPN",
+    icon: path.join(__dirname, '../public/icon.png')
   });
 
   if (isDev) {

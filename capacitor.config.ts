@@ -2,7 +2,7 @@ import { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.doublevpn.manager',
-  appName: 'Double VPN Manager',
+  appName: 'Double Tunnel VPN',
   webDir: 'dist',
   server: {
     androidScheme: 'https'
