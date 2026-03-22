@@ -465,6 +465,7 @@ log_step() {
 collect_debug_info() {
   log_step "Collecting system debug information..."
   journalctl -n 200 > "$LOG_DIR/system_journal.log"
+  journalctl -xeu docker.service > "$LOG_DIR/docker_journal.log" || true
   dmesg | tail -n 100 > "$LOG_DIR/dmesg.log"
   iptables -S > "$LOG_DIR/iptables_filter.log"
   iptables -t nat -S > "$LOG_DIR/iptables_nat.log"
@@ -476,6 +477,7 @@ collect_debug_info() {
   if command -v docker &> /dev/null; then
     docker ps -a > "$LOG_DIR/docker_containers.log"
     docker logs wg-easy &> "$LOG_DIR/wg_easy_container.log" || true
+    docker info > "$LOG_DIR/docker_info.log" || true
   fi
   log_step "Debug information collected in $LOG_DIR"
 }
@@ -498,6 +500,17 @@ wait_for_service() {
   while ! systemctl is-active --quiet "$service"; do
     if [ $attempt -ge $max_attempts ]; then
       log_step "ERROR: $service failed to start after $max_attempts attempts."
+      if [ "$service" == "docker" ]; then
+        log_step "Attempting to fix Docker..."
+        fix_docker
+        # Retry once after fix
+        systemctl start docker || true
+        sleep 5
+        if systemctl is-active --quiet "docker"; then
+          log_step "Docker is now active after fix."
+          return 0
+        fi
+      fi
       exit 1
     fi
     log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
@@ -505,6 +518,46 @@ wait_for_service() {
     attempt=$((attempt + 1))
   done
   log_step "$service is now active."
+}
+
+fix_docker() {
+  log_step "Running Docker repair routine..."
+  # 1. Check for Snap Docker and purge it
+  if command -v snap &> /dev/null; then
+    log_step "Removing Snap Docker..."
+    snap remove docker || true
+  fi
+  
+  # 2. Stop Docker and remove potentially corrupted data
+  systemctl stop docker || true
+  systemctl stop docker.socket || true
+  
+  # 3. Check for conflicting files
+  rm -rf /var/lib/docker/network/files/local-kv.db || true
+  
+  # 4. Ensure daemon.json is valid or reset it
+  if [ -f /etc/docker/daemon.json ]; then
+    log_step "Backing up and resetting /etc/docker/daemon.json..."
+    mv /etc/docker/daemon.json /etc/docker/daemon.json.bak || true
+  fi
+  
+  # 5. Check for AppArmor issues
+  if command -v apparmor_status &> /dev/null; then
+    log_step "Checking AppArmor status..."
+    aa-status || true
+  fi
+
+  # 6. Try to restart
+  systemctl unmask docker.service || true
+  systemctl unmask docker.socket || true
+  systemctl daemon-reload
+  systemctl start docker.socket || true
+  systemctl start docker || true
+  
+  if ! systemctl is-active --quiet "docker"; then
+    log_step "Docker still failed after repair. Rebooting might help."
+    echo "REBOOT_REQUIRED"
+  fi
 }
 
 # 1. Update & Install
@@ -679,6 +732,12 @@ echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iptables-persistent
 netfilter-persistent save || true
+
+# Final check for reboot requirement
+if [ -f /var/run/reboot-required ]; then
+  log_step "System requires a reboot to complete installation."
+  echo "REBOOT_REQUIRED"
+fi
 
 log_step "--- VPS1 Double VPN Setup Complete ---"
 `,
@@ -858,6 +917,12 @@ echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-
 echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iptables-persistent
 netfilter-persistent save || true
+
+# Final check for reboot requirement
+if [ -f /var/run/reboot-required ]; then
+  log_step "System requires a reboot to complete installation."
+  echo "REBOOT_REQUIRED"
+fi
 
 log_step "--- VPS2 Exit Node Setup Complete ---"
 `,
@@ -1437,6 +1502,42 @@ ClientNames=${preSetupConfig.clientNames}
     }
   };
 
+  const rebootVpsAndWait = async (vps: VPSConfig, vpsName: string) => {
+    addLog(`Initiating reboot for ${vpsName}...`, "info");
+    try {
+      // Send reboot command and ignore the inevitable disconnection error
+      await sshExecute(vps, "reboot");
+    } catch (e) {
+      // Expected disconnection
+    }
+    
+    addLog(`Waiting for ${vpsName} to come back online (this may take up to 2 minutes)...`, "info");
+    
+    // Wait for 15 seconds before starting to check (give it time to actually shut down)
+    await new Promise(r => setTimeout(r, 15000));
+    
+    let backOnline = false;
+    const maxAttempts = 24; // 24 * 5 seconds = 2 minutes
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        const res = await sshExecute(vps, "echo 'online'");
+        if (res.stdout.trim().includes('online')) {
+          backOnline = true;
+          break;
+        }
+      } catch (e) {
+        // Still offline or SSH not ready
+      }
+      await new Promise(r => setTimeout(r, 5000));
+    }
+    
+    if (!backOnline) {
+      throw new Error(`${vpsName} failed to come back online after reboot. Please check it manually.`);
+    }
+    
+    addLog(`${vpsName} is back online. Resuming deployment...`, "success");
+  };
+
   const startDeployment = async (isCleanInstall: boolean = false) => {
     if (!activeTunnel.vps1.password || !activeTunnel.vps2.password) {
       alert("Please provide root passwords for both servers.");
@@ -1593,7 +1694,15 @@ ClientNames=${preSetupConfig.clientNames}
 
       const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
       
-      if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
+      if (vps2Result.stdout.includes("REBOOT_REQUIRED")) {
+        await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
+        // Retry setup after reboot
+        addLog("Retrying VPS2 setup after reboot...", "info");
+        const retryResult = await sshExecute(activeTunnel.vps2, vps2Setup);
+        if (retryResult.code !== 0 && retryResult.code !== undefined) {
+          throw new Error(`VPS2 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
+        }
+      } else if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
         throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput || vps2Result.stderr}`);
       }
       
@@ -1612,7 +1721,15 @@ ClientNames=${preSetupConfig.clientNames}
       
       const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
       
-      if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
+      if (vps1Result.stdout.includes("REBOOT_REQUIRED")) {
+        await rebootVpsAndWait(activeTunnel.vps1, "VPS1 (Gateway)");
+        // Retry setup after reboot
+        addLog("Retrying VPS1 setup after reboot...", "info");
+        const retryResult = await sshExecute(activeTunnel.vps1, vps1Setup);
+        if (retryResult.code !== 0 && retryResult.code !== undefined) {
+          throw new Error(`VPS1 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
+        }
+      } else if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
         throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput || vps1Result.stderr}`);
       }
       
