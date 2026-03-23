@@ -33,6 +33,7 @@ import {
   ChevronLeft,
   Menu,
   X,
+  XCircle,
   Search,
   Monitor,
   Smartphone,
@@ -234,6 +235,8 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isDeploying, setIsDeploying] = useState(false);
+  const cancelDeploymentRef = useRef(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   
   useEffect(() => {
@@ -255,8 +258,52 @@ export default function App() {
   const [vpsLogs, setVpsLogs] = useState<{vps: string, logs: string}[]>([]);
   const [terminalInput, setTerminalInput] = useState('');
   const [pasteBuffer, setPasteBuffer] = useState('');
+  const [selectedVpsIndex, setSelectedVpsIndex] = useState(0);
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const connectTerminal = () => {
+    if (!xtermRef.current) return;
+    if (wsRef.current) wsRef.current.close();
+    
+    const vps = selectedVpsIndex === 0 ? activeTunnel.vps1 : activeTunnel.vps2;
+    if (!vps.ip || !vps.password) {
+      xtermRef.current.writeln('\r\n\x1b[1;31m[ERROR] Please provide VPS IP and password in Settings first.\x1b[0m');
+      return;
+    }
+
+    xtermRef.current.clear();
+    xtermRef.current.writeln(`\x1b[1;32mConnecting to ${vps.name || (selectedVpsIndex === 0 ? 'VPS1' : 'VPS2')} (${vps.ip})...\x1b[0m`);
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${window.location.host}/terminal`);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: 'connect',
+        config: {
+          host: vps.ip,
+          username: vps.user,
+          password: vps.password
+        }
+      }));
+    };
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'data' && xtermRef.current) {
+        xtermRef.current.write(msg.data);
+      } else if (msg.type === 'error') {
+        xtermRef.current?.writeln(`\r\n\x1b[1;31m[SSH ERROR] ${msg.message}\x1b[0m`);
+      }
+    };
+
+    ws.onclose = () => {
+      xtermRef.current?.writeln('\r\n\x1b[1;31m[SESSION CLOSED]\x1b[0m');
+    };
+  };
 
   useEffect(() => {
     if (activeTab === 'terminal' && terminalRef.current && !xtermRef.current) {
@@ -285,30 +332,22 @@ export default function App() {
       term.writeln('\x1b[1;32m| |____\\ \\_/ / |__| | |___| |__| | |__| / /   \\ \\ | \\ \\| |__|\x1b[0m');
       term.writeln('\x1b[1;32m|______|\\___/|_____/|______\\_____|\\____/_/     \\_\\_|  \\_\\_____/\x1b[0m');
       term.writeln('');
-      term.writeln(`\x1b[1;30mLast login: ${new Date().toLocaleString()} from ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}\x1b[0m`);
-      term.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
+      term.writeln('\x1b[1;30mIntegrated SSH Terminal Ready.\x1b[0m');
+      term.writeln('\x1b[1;30mSelect a VPS and click "ESTABLISH CONNECTION" to start.\x1b[0m');
 
-      let currentLine = '';
       term.onData(data => {
-        if (data === '\r') {
-          // Handle enter
-          term.write('\r\n');
-          executeCommand(currentLine);
-          currentLine = '';
-          term.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
-        } else if (data === '\u007f') {
-          // Handle backspace
-          if (currentLine.length > 0) {
-            currentLine = currentLine.slice(0, -1);
-            term.write('\b \b');
-          }
-        } else if (data === '\u0003') {
-          // Handle Ctrl+C
-          term.write('^C\r\n\x1b[1;32mroot@vps1:~# \x1b[0m');
-          currentLine = '';
-        } else {
-          currentLine += data;
-          term.write(data);
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'data', data }));
+        }
+      });
+
+      term.onResize(size => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'resize',
+            cols: size.cols,
+            rows: size.rows
+          }));
         }
       });
 
@@ -320,9 +359,8 @@ export default function App() {
         e.preventDefault();
         try {
           const text = await navigator.clipboard.readText();
-          if (text) {
-            term.write(text);
-            currentLine += text;
+          if (text && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'data', data: text }));
           }
         } catch (err) {
           console.error('Failed to read clipboard:', err);
@@ -332,9 +370,11 @@ export default function App() {
 
       const handleResize = () => fitAddon.fit();
       window.addEventListener('resize', handleResize);
+      
       return () => {
         window.removeEventListener('resize', handleResize);
         terminalElement?.removeEventListener('contextmenu', handleContextMenu);
+        if (wsRef.current) wsRef.current.close();
         term.dispose();
         xtermRef.current = null;
       };
@@ -661,6 +701,19 @@ fi
 
 # 4. Setup VPS-to-VPS Tunnel (wg1)
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
+
+# Generate or use existing keys
+if [ -f /etc/wireguard/wg1.key ]; then
+  log_step "Using existing wg1 keys..."
+  PRIV_KEY=$(cat /etc/wireguard/wg1.key)
+else
+  log_step "Generating new wg1 keys..."
+  PRIV_KEY=$(wg genkey)
+  echo "$PRIV_KEY" > /etc/wireguard/wg1.key
+fi
+PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
+echo "$PUB_KEY" > /etc/wireguard/wg1.pub
+
 # Detect primary interface and IP to ensure management traffic bypasses the tunnel
 PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 if [ -z "$PRIMARY_IF" ]; then PRIMARY_IF="eth0"; fi
@@ -681,7 +734,7 @@ fi
 mkdir -p /etc/wireguard
 cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
-PrivateKey = __VPS1_WG1_PRIV_KEY__
+PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
 MTU = 1280
 
@@ -708,9 +761,10 @@ systemctl enable wg-quick@wg1 || true
 systemctl start wg-quick@wg1 || true
 wait_for_service "wg-quick@wg1"
 
-# Output public key for the app to capture
-log_step "Capturing public key..."
-echo "publickey: __VPS1_WG1_PUB_KEY__"
+# Output keys for the app to capture
+echo "RESULT_WG1_PUB_KEY: $PUB_KEY"
+WG0_PUB=$(docker exec wg-easy wg show wg0 public-key || echo "")
+echo "RESULT_WG0_PUB_KEY: $WG0_PUB"
 
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
 log_step "Configuring IPTables routing rules..."
@@ -872,10 +926,18 @@ sysctl -p || true
 log_step "Configuring WireGuard (wg0) as Exit Node..."
 mkdir -p /etc/wireguard
 cd /etc/wireguard
-PRIV_KEY="__VPS2_WG0_PRIV_KEY__"
-PUB_KEY="__VPS2_WG0_PUB_KEY__"
-echo "$PRIV_KEY" > privatekey
-echo "$PUB_KEY" > publickey
+
+# Generate or use existing keys
+if [ -f /etc/wireguard/wg0.key ]; then
+  log_step "Using existing wg0 keys..."
+  PRIV_KEY=$(cat /etc/wireguard/wg0.key)
+else
+  log_step "Generating new wg0 keys..."
+  PRIV_KEY=$(wg genkey)
+  echo "$PRIV_KEY" > /etc/wireguard/wg0.key
+fi
+PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
+echo "$PUB_KEY" > /etc/wireguard/wg0.pub
 
 cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
@@ -898,9 +960,8 @@ systemctl enable wg-quick@wg0 || true
 systemctl start wg-quick@wg0 || true
 wait_for_service "wg-quick@wg0"
 
-# Output public key for the app to capture
-log_step "Capturing public key..."
-echo "publickey: $PUB_KEY"
+# Output keys for the app to capture
+echo "RESULT_WG0_PUB_KEY: $PUB_KEY"
 
 # 4. EXIT NODE ROUTING (Tunnel -> Internet)
 log_step "Configuring IPTables routing rules..."
@@ -1477,7 +1538,7 @@ ClientNames=${preSetupConfig.clientNames}
 
   const sshExecute = async (vps: VPSConfig, command: string) => {
     try {
-      console.log(`Executing SSH command on ${vps.ip}...`);
+      console.log(`Executing SSH command on ${vps.ip}: ${command.substring(0, 50)}...`);
       
       // Use Electron IPC if available (for built app)
       if (window.electron && window.electron.sshExecute) {
@@ -1499,41 +1560,66 @@ ClientNames=${preSetupConfig.clientNames}
       }
 
       // Fallback to fetch (for development/web)
-      const response = await fetch('/api/ssh/execute', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host: vps.ip,
-          username: vps.user,
-          password: vps.password,
-          command
-        })
-      });
-      
-      if (!response.ok) {
-        let errorMessage = 'SSH Execution Failed';
-        try {
-          const errorData = await response.json();
-          errorMessage = errorData.error || errorMessage;
-        } catch (e) {
-          errorMessage = `HTTP Error ${response.status}: ${response.statusText}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 70000); // 70s timeout
+
+      try {
+        const response = await fetch('/api/ssh/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: controller.signal,
+          body: JSON.stringify({
+            host: vps.ip,
+            username: vps.user,
+            password: vps.password,
+            command
+          })
+        });
+        
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          let errorMessage = 'SSH Execution Failed';
+          try {
+            const errorData = await response.json();
+            errorMessage = errorData.error || errorMessage;
+          } catch (e) {
+            errorMessage = `HTTP Error ${response.status}: ${response.statusText}`;
+          }
+          throw new Error(errorMessage);
         }
-        throw new Error(errorMessage);
+        
+        const data = await response.json();
+        return {
+          stdout: data.stdout || "",
+          stderr: data.stderr || "",
+          errorOutput: data.errorOutput || data.stderr || "",
+          code: data.code ?? 0
+        };
+      } catch (err: any) {
+        clearTimeout(timeoutId);
+        if (err.name === 'AbortError') {
+          throw new Error(`SSH Request Timed Out (${vps.ip})`);
+        }
+        throw err;
       }
-      
-      const data = await response.json();
-      return {
-        stdout: data.stdout || "",
-        stderr: data.stderr || "",
-        errorOutput: data.errorOutput || data.stderr || "",
-        code: data.code ?? 0
-      };
     } catch (error: any) {
-      console.error(`SSH Fetch Error for ${vps.ip}:`, error);
-      if (error.name === 'TypeError' && error.message === 'Failed to fetch') {
-        throw new Error(`SSH Error (${vps.ip}): Backend unreachable or connection refused. Please ensure the server is running.`);
+      console.error(`SSH Execution Error on ${vps.ip}:`, error);
+      throw error; // Let the caller handle it
+    }
+  };
+
+  const getVpsPublicKey = async (vps: VPSConfig, iface: string) => {
+    try {
+      let res = await sshExecute(vps, `wg show ${iface} public-key`);
+      if (res.code !== 0 && iface === 'wg0') {
+        // Try docker if it's wg0 (wg-easy)
+        res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
       }
-      throw new Error(`SSH Error (${vps.ip}): ${error.message}`);
+      return res.stdout.trim();
+    } catch (e) {
+      console.error(`Failed to get public key for ${iface} on ${vps.ip}:`, e);
+      return "";
     }
   };
 
@@ -1575,36 +1661,14 @@ ClientNames=${preSetupConfig.clientNames}
 
   const isVpsDeployed = async (vps: VPSConfig, interfaces: string[]) => {
     try {
-      for (const iface of interfaces) {
-        // Check if interface exists and is a WireGuard interface
-        const wgShow = await sshExecute(vps, `wg show ${iface}`);
-        if (wgShow.code !== 0) return false;
-        
-        // Check if service is active
-        const serviceCheck = await sshExecute(vps, `systemctl is-active wg-quick@${iface}`);
-        if (serviceCheck.stdout.trim() !== 'active') return false;
-
-        // Check if config file exists
-        const confCheck = await sshExecute(vps, `ls /etc/wireguard/${iface}.conf`);
-        if (confCheck.code !== 0) return false;
-      }
-
-      // Check IP forwarding
-      const forwardCheck = await sshExecute(vps, `cat /proc/sys/net/ipv4/ip_forward`);
-      if (forwardCheck.stdout.trim() !== '1') return false;
-
-      return true;
+      const checkCmd = interfaces.map(iface => 
+        `[ -f /etc/wireguard/${iface}.conf ] && [ "$(systemctl is-active wg-quick@${iface} || echo 'inactive')" == "active" ]`
+      ).join(' && ') + ' && [ "$(cat /proc/sys/net/ipv4/ip_forward || echo 0)" == "1" ] && echo "DEPLOYED"';
+      
+      const result = await sshExecute(vps, checkCmd);
+      return result.stdout.trim() === 'DEPLOYED';
     } catch (e) {
       return false;
-    }
-  };
-
-  const getVpsPublicKey = async (vps: VPSConfig, iface: string) => {
-    try {
-      const res = await sshExecute(vps, `wg show ${iface} public-key`);
-      return res.stdout.trim();
-    } catch (e) {
-      return "";
     }
   };
 
@@ -1619,10 +1683,21 @@ ClientNames=${preSetupConfig.clientNames}
       return;
     }
 
+    setIsDeploying(true);
+    cancelDeploymentRef.current = false;
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
+    addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info");
 
     try {
+      // Helper to check for cancellation
+      const checkCancel = () => {
+        if (cancelDeploymentRef.current) {
+          throw new Error("Deployment cancelled by user.");
+        }
+      };
+
       // --- Pre-Deployment Connection Verification ---
+      checkCancel();
       addLog("Phase 0: Pre-Deployment Connection Verification...", "info");
       
       updateActiveTunnel({ 
@@ -1729,37 +1804,44 @@ ClientNames=${preSetupConfig.clientNames}
 
       // --- Key Generation Phase ---
       addLog("Preparing WireGuard keys...", "info");
-      let d_vps1_wg0_priv = generateWGKey();
-      let d_vps1_wg0_pub = generateWGKey(); 
-      let d_vps1_wg1_priv = generateWGKey();
-      let d_vps1_wg1_pub = generateWGKey();
-      let d_vps2_wg0_priv = generateWGKey();
-      let d_vps2_wg0_pub = generateWGKey();
+      
+      // We'll let the scripts generate keys if they don't exist, 
+      // but we need placeholders for the initial injection.
+      let d_vps1_wg0_pub = "";
+      let d_vps1_wg1_pub = "";
+      let d_vps2_wg0_pub = "";
 
       // --- VPS2 Deployment ---
       addLog("Checking if VPS2 (Exit Node) is already deployed...", "info");
       const vps2AlreadyDeployed = await isVpsDeployed(activeTunnel.vps2, ['wg0']);
       
       if (vps2AlreadyDeployed && !isCleanInstall) {
+        checkCancel();
         addLog("VPS2 (Exit Node) is already deployed and active. Fetching existing keys...", "success");
-        const existingPub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
-        if (existingPub) {
-          d_vps2_wg0_pub = existingPub;
-          addLog(`Existing VPS2 PubKey recovered: ${existingPub.substring(0, 10)}...`, "info");
+        d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+        if (d_vps2_wg0_pub) {
+          addLog(`Existing VPS2 PubKey recovered: ${d_vps2_wg0_pub.substring(0, 10)}...`, "info");
         }
       } else {
+        checkCancel();
         if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS2...", "info");
         addLog("Initiating deployment for VPS2 (Exit Node)...", "info");
         addLog(`Connecting to ${activeTunnel.vps2.ip} via SSH...`, "cmd");
         
         let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
-        // Inject keys into VPS2 Setup
-        vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PRIV_KEY__', d_vps2_wg0_priv);
-        vps2Setup = vps2Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
-        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
-
+        // Note: VPS2 setup doesn't strictly need VPS1's key yet for basic interface up,
+        // but it's better to have it. However, we generate VPS1's key later.
+        // We'll update the peer in the Final Sync phase.
+        
         const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
         
+        // Parse public key from output
+        const vps2PubMatch = vps2Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
+        if (vps2PubMatch) {
+          d_vps2_wg0_pub = vps2PubMatch[1];
+          addLog(`VPS2 Public Key captured: ${d_vps2_wg0_pub.substring(0, 10)}...`, "success");
+        }
+
         if ((vps2Result?.stdout || "").includes("REBOOT_REQUIRED")) {
           await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
           addLog("Retrying VPS2 setup after reboot...", "info");
@@ -1767,6 +1849,8 @@ ClientNames=${preSetupConfig.clientNames}
           if (retryResult.code !== 0 && retryResult.code !== undefined) {
             throw new Error(`VPS2 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
           }
+          const retryPubMatch = retryResult.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
+          if (retryPubMatch) d_vps2_wg0_pub = retryPubMatch[1];
         } else if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
           throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput || vps2Result.stderr}`);
         }
@@ -1786,25 +1870,40 @@ ClientNames=${preSetupConfig.clientNames}
       const vps1AlreadyDeployed = await isVpsDeployed(activeTunnel.vps1, ['wg0', 'wg1']);
 
       if (vps1AlreadyDeployed && !isCleanInstall) {
+        checkCancel();
         addLog("VPS1 (Gateway) is already deployed and active. Fetching existing keys...", "success");
-        const existingPub1 = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
-        if (existingPub1) {
-          d_vps1_wg1_pub = existingPub1;
-          addLog(`Existing VPS1 PubKey recovered: ${existingPub1.substring(0, 10)}...`, "info");
+        d_vps1_wg1_pub = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
+        if (d_vps1_wg1_pub) {
+          addLog(`Existing VPS1 PubKey recovered: ${d_vps1_wg1_pub.substring(0, 10)}...`, "info");
+        }
+        d_vps1_wg0_pub = await getVpsPublicKey(activeTunnel.vps1, 'wg0');
+        if (d_vps1_wg0_pub) {
+          addLog(`Existing VPS1 WG0 PubKey recovered: ${d_vps1_wg0_pub.substring(0, 10)}...`, "info");
         }
       } else {
+        checkCancel();
         if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS1...", "info");
         addLog("Initiating deployment for VPS1 (Gateway)...", "info");
         addLog(`Connecting to ${activeTunnel.vps1.ip} via SSH...`, "cmd");
 
         let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
-        // Inject keys into VPS1 Setup
-        vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PRIV_KEY__', d_vps1_wg1_priv);
-        vps1Setup = vps1Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub);
+        // Inject VPS2's key into VPS1 Setup
         vps1Setup = vps1Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
         
         const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
         
+        // Parse public key from output
+        const vps1PubMatch = vps1Result.stdout.match(/RESULT_WG1_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
+        if (vps1PubMatch) {
+          d_vps1_wg1_pub = vps1PubMatch[1];
+          addLog(`VPS1 Public Key captured: ${d_vps1_wg1_pub.substring(0, 10)}...`, "success");
+        }
+        const vps1Wg0PubMatch = vps1Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
+        if (vps1Wg0PubMatch) {
+          d_vps1_wg0_pub = vps1Wg0PubMatch[1];
+          addLog(`VPS1 WG0 Public Key captured: ${d_vps1_wg0_pub.substring(0, 10)}...`, "success");
+        }
+
         if ((vps1Result?.stdout || "").includes("REBOOT_REQUIRED")) {
           await rebootVpsAndWait(activeTunnel.vps1, "VPS1 (Gateway)");
           addLog("Retrying VPS1 setup after reboot...", "info");
@@ -1812,11 +1911,25 @@ ClientNames=${preSetupConfig.clientNames}
           if (retryResult.code !== 0 && retryResult.code !== undefined) {
             throw new Error(`VPS1 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
           }
+          const retryPubMatch = retryResult.stdout.match(/RESULT_WG1_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
+          if (retryPubMatch) d_vps1_wg1_pub = retryPubMatch[1];
         } else if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
           throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput || vps1Result.stderr}`);
         }
         addLog("VPS1 Setup Complete.", "success");
       }
+
+      // --- Final Key Sync ---
+      checkCancel();
+      addLog("Ensuring peer keys are synchronized between nodes...", "info");
+      // Update VPS1's peer (VPS2)
+      const updateVps1Peer = `wg set wg1 peer ${d_vps2_wg0_pub} allowed-ips 0.0.0.0/0 endpoint ${activeTunnel.vps2.ip}:51822 && wg-quick save wg1`;
+      await sshExecute(activeTunnel.vps1, updateVps1Peer);
+      
+      // Update VPS2's peer (VPS1)
+      const updateVps2Peer = `wg set wg0 peer ${d_vps1_wg1_pub} allowed-ips 10.9.0.0/24 && wg-quick save wg0`;
+      await sshExecute(activeTunnel.vps2, updateVps2Peer);
+      addLog("Peer keys synchronized successfully.", "success");
       
       updateActiveTunnel({ 
         step: 2, 
@@ -1941,83 +2054,15 @@ ClientNames=${preSetupConfig.clientNames}
     const trimmedCmd = command.trim();
     if (!trimmedCmd) return;
 
-    setTerminalOutput(prev => [...prev, `root@vps1:~# ${trimmedCmd}`]);
-    if (xtermRef.current) {
-      xtermRef.current.writeln(`\x1b[1;32mroot@vps1:~# \x1b[0m\x1b[1;37m${trimmedCmd}\x1b[0m`);
-    }
-
-    // Check if it's a script execution
-    const scriptMatch = trimmedCmd.match(/^\.\/([a-zA-Z0-9._-]+)\.sh$/);
-    if (scriptMatch) {
-      const scriptName = scriptMatch[1];
-      // Find the script in our scripts state or check if it's a known script
-      const scriptExists = scripts.find(s => 
-        s.title.toLowerCase().includes(scriptName.toLowerCase()) || 
-        s.id === scriptName ||
-        (s.title.includes('(') && s.title.split('(')[1].split(')')[0] === `${scriptName}.sh`)
-      );
-      
-      if (scriptExists || scriptName === 'lodgeguard-sync') {
-        runAutomation(scriptName);
-      } else {
-        const msg = `bash: ./${scriptName}.sh: No such file or directory`;
-        setTerminalOutput(prev => [...prev, msg]);
-        if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
-      }
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'data', data: trimmedCmd + '\n' }));
       return;
     }
 
-    // Handle other commands
-    const cmd = trimmedCmd.toLowerCase();
-    if (cmd === 'ls') {
-      const msg = 'lodgeguard-sync.sh  vps1-setup.sh  vps2-setup.sh  wg0.conf  wg1.conf';
-      setTerminalOutput(prev => [...prev, msg]);
-      if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;34m${msg}\x1b[0m`);
-    } else if (cmd === 'clear') {
-      setTerminalOutput([]);
-      if (xtermRef.current) {
-        xtermRef.current.clear();
-        xtermRef.current.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
-      }
-    } else if (cmd === 'whoami') {
-      const msg = 'root';
-      setTerminalOutput(prev => [...prev, msg]);
-      if (xtermRef.current) xtermRef.current.writeln(msg);
-    } else if (cmd === 'pwd') {
-      const msg = '/root';
-      setTerminalOutput(prev => [...prev, msg]);
-      if (xtermRef.current) xtermRef.current.writeln(msg);
-    } else if (cmd === 'help') {
-      const msg = 'Available commands: ls, clear, whoami, pwd, help, date, cat [file], ./[script].sh';
-      setTerminalOutput(prev => [...prev, msg]);
-      if (xtermRef.current) xtermRef.current.writeln(msg);
-    } else if (cmd === 'date') {
-      const msg = new Date().toString();
-      setTerminalOutput(prev => [...prev, msg]);
-      if (xtermRef.current) xtermRef.current.writeln(msg);
-    } else if (cmd.startsWith('cat ')) {
-      const fileName = trimmedCmd.split(' ')[1];
-      if (fileName === 'lodgeguard-sync.sh' || fileName === './lodgeguard-sync.sh') {
-        const content = INITIAL_SCRIPTS[0].content;
-        setTerminalOutput(prev => [...prev, ...content.split('\n')]);
-        if (xtermRef.current) xtermRef.current.writeln(content);
-      } else if (fileName) {
-        const msg = `cat: ${fileName}: No such file or directory`;
-        setTerminalOutput(prev => [...prev, msg]);
-        if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
-      } else {
-        const msg = 'cat: missing operand';
-        setTerminalOutput(prev => [...prev, msg]);
-        if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
-      }
-    } else {
-      const msg = `bash: ${trimmedCmd}: command not found`;
-      setTerminalOutput(prev => [...prev, msg]);
-      if (xtermRef.current) xtermRef.current.writeln(`\x1b[1;31m${msg}\x1b[0m`);
-    }
-
+    // Fallback for when terminal is not connected
+    setTerminalOutput(prev => [...prev, `[NOT CONNECTED] root@vps1:~# ${trimmedCmd}`]);
     if (xtermRef.current) {
-      xtermRef.current.write('\x1b[1;32mroot@vps1:~# \x1b[0m');
+      xtermRef.current.writeln(`\r\n\x1b[1;31m[NOT CONNECTED] Please establish connection first.\x1b[0m`);
     }
   };
 
@@ -3549,7 +3594,7 @@ PersistentKeepalive = 25`;
                           </div>
                         </div>
 
-                        <div className="flex gap-3">
+                        <div className="flex flex-wrap gap-3">
                           <button 
                             onClick={() => startDeployment(false)}
                             disabled={activeTunnel.status === 'deploying'}
@@ -3567,6 +3612,20 @@ PersistentKeepalive = 25`;
                               </>
                             )}
                           </button>
+                          
+                          {activeTunnel.status === 'deploying' && (
+                            <button 
+                              onClick={() => {
+                                cancelDeploymentRef.current = true;
+                                addLog("Cancellation requested...", "error");
+                              }}
+                              className="px-6 py-4 bg-red-500/10 hover:bg-red-500/20 text-red-500 font-bold rounded-xl border border-red-500/20 transition-all flex items-center justify-center gap-2"
+                            >
+                              <XCircle className="w-5 h-5" />
+                              <span>STOP</span>
+                            </button>
+                          )}
+
                           <button 
                             onClick={() => startDeployment(true)}
                             disabled={activeTunnel.status === 'deploying'}
@@ -3616,7 +3675,17 @@ PersistentKeepalive = 25`;
 
                   <div className="space-y-6">
                     <Card title="Deployment Logs" icon={Terminal} className="h-full">
-                      <div className="bg-zinc-950 rounded-xl border border-zinc-800 p-4 h-[500px] overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-thin scrollbar-thumb-zinc-800">
+                      <div className="flex flex-col h-full">
+                        <div className="flex justify-end mb-2">
+                          <button 
+                            onClick={() => updateActiveTunnel({ logs: [] })}
+                            className="text-[10px] font-bold text-zinc-500 hover:text-zinc-300 uppercase tracking-widest flex items-center gap-1"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            Clear Logs
+                          </button>
+                        </div>
+                        <div className="bg-zinc-950 rounded-xl border border-zinc-800 p-4 h-[500px] overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-thin scrollbar-thumb-zinc-800">
                         {activeTunnel.logs.length === 0 && (
                           <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2">
                             <Database className="w-8 h-8 opacity-20" />
@@ -3637,6 +3706,7 @@ PersistentKeepalive = 25`;
                             </span>
                           </div>
                         ))}
+                        </div>
                       </div>
                     </Card>
                   </div>
@@ -3662,16 +3732,21 @@ PersistentKeepalive = 25`;
                   <div className="lg:col-span-1 space-y-4">
                     <Card title="Select Session" icon={Server}>
                       <div className="space-y-2">
-                        {VPS_DATA.map((vps, i) => (
+                        {[activeTunnel.vps1, activeTunnel.vps2].map((vps, i) => (
                           <button
                             key={i}
-                            className="w-full flex items-center justify-between p-3 bg-zinc-950 border border-zinc-800 rounded-xl hover:border-emerald-500/50 transition-all group"
+                            onClick={() => setSelectedVpsIndex(i)}
+                            className={`w-full flex items-center justify-between p-3 border rounded-xl transition-all group ${
+                              selectedVpsIndex === i 
+                                ? 'bg-emerald-500/10 border-emerald-500' 
+                                : 'bg-zinc-950 border-zinc-800 hover:border-emerald-500/50'
+                            }`}
                           >
                             <div className="flex items-center gap-3">
                               <Terminal className="w-4 h-4 text-zinc-600 group-hover:text-emerald-500" />
-                              <span className="text-xs font-bold text-zinc-300">{vps.name}</span>
+                              <span className="text-xs font-bold text-zinc-300">{i === 0 ? 'VPS1 (Gateway)' : 'VPS2 (Exit Node)'}</span>
                             </div>
-                            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                            <div className={`w-1.5 h-1.5 rounded-full ${vps.ip ? 'bg-emerald-500' : 'bg-zinc-700'}`} />
                           </button>
                         ))}
                       </div>
@@ -3683,18 +3758,21 @@ PersistentKeepalive = 25`;
                           <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Username</label>
                           <input 
                             type="text" 
-                            defaultValue="root"
-                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500"
+                            readOnly
+                            value="root"
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-500 focus:outline-none"
                           />
                         </div>
                         <div className="space-y-2">
                           <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Auth Method</label>
                           <select className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500">
-                            <option>SSH Key (Recommended)</option>
                             <option>Password</option>
                           </select>
                         </div>
-                        <button className="w-full py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all text-xs">
+                        <button 
+                          onClick={connectTerminal}
+                          className="w-full py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all text-xs"
+                        >
                           ESTABLISH CONNECTION
                         </button>
                       </div>
@@ -3733,7 +3811,9 @@ PersistentKeepalive = 25`;
                             <div className="w-2.5 h-2.5 rounded-full bg-amber-500/20 border border-amber-500/40" />
                             <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/20 border border-emerald-500/40" />
                           </div>
-                          <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest ml-4">root@vps1:~</span>
+                          <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest ml-4">
+                            root@{selectedVpsIndex === 0 ? activeTunnel.vps1.ip : activeTunnel.vps2.ip}:~
+                          </span>
                         </div>
                         <div className="flex items-center gap-4">
                           {isRotating && (
