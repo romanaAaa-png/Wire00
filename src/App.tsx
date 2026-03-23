@@ -958,7 +958,8 @@ EOF
 log_step "Starting wg0 interface..."
 systemctl enable wg-quick@wg0 || true
 systemctl start wg-quick@wg0 || true
-wait_for_service "wg-quick@wg0"
+# Initial start might fail if keys are placeholders, we'll sync them later
+# wait_for_service "wg-quick@wg0"
 
 # Output keys for the app to capture
 echo "RESULT_WG0_PUB_KEY: $PUB_KEY"
@@ -1830,7 +1831,7 @@ ClientNames=${preSetupConfig.clientNames}
         
         let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
         // Inject a dummy key if VPS1 key is not yet known (it will be synced later)
-        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub || 'mP8vW9R/X6l2Y7z4vW9R/X6l2Y7z4vW9R/X6l2Y7z4=');
+        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub || 'mP8vW9R/X6l2Y7z4vW9R/X6l2Y7z4vW9R/X6l2Y7z4A=');
         
         const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
         
