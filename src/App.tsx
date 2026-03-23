@@ -554,8 +554,13 @@ do_prepare() {
   export NEEDRESTART_MODE=a
 
   log_step "prepare" "Installing Docker, WireGuard Tools & SSH Tools..."
-  apt-get update || true
-  apt-get install -y -o Dpkg::Options::="--force-confnew" ca-certificates curl gnupg wireguard wireguard-tools iptables iproute2 sshpass || true
+  apt-get update
+  apt-get install -y -o Dpkg::Options::="--force-confnew" ca-certificates curl gnupg wireguard wireguard-tools iptables iproute2 sshpass
+  
+  if ! command -v wg &> /dev/null; then
+    log_step "prepare" "ERROR: wireguard-tools installation failed. 'wg' command not found."
+    exit 1
+  fi
   
   # Docker Installation
   if ! command -v docker &> /dev/null; then
@@ -699,10 +704,24 @@ EOF
   log_step "configure" "--- VPS1 Configuration Phase Complete ---"
 }
 
+do_push_key() {
+  PEER_IP="$1"
+  PEER_PASS="$2"
+  IFACE="$3"
+  if [ -z "$PEER_IP" ] || [ -z "$PEER_PASS" ]; then
+    log_step "push-key" "ERROR: Peer IP or Password missing."
+    exit 1
+  fi
+  PUB_KEY=$(cat /etc/wireguard/\${IFACE}.pub)
+  log_step "push-key" "Pushing \$IFACE public key to \$PEER_IP..."
+  sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"
+}
+
 case "$1" in
   prepare) do_prepare ;;
   configure) do_configure "$2" ;;
-  *) echo "Usage: $0 {prepare|configure} [peer_pub]"; exit 1 ;;
+  push-key) do_push_key "$2" "$3" "$4" ;;
+  *) echo "Usage: $0 {prepare|configure|push-key} [peer_pub]"; exit 1 ;;
 esac
 `,
       rollbackContent: `#!/bin/bash
@@ -749,8 +768,13 @@ do_prepare() {
   export NEEDRESTART_MODE=a
 
   log_step "prepare" "Installing WireGuard & Tools..."
-  apt-get update || true
-  apt-get install -y -o Dpkg::Options::="--force-confnew" wireguard wireguard-tools iptables curl iproute2 || true
+  apt-get update
+  apt-get install -y -o Dpkg::Options::="--force-confnew" wireguard wireguard-tools iptables curl iproute2 sshpass
+  
+  if ! command -v wg &> /dev/null; then
+    log_step "prepare" "ERROR: wireguard-tools installation failed. 'wg' command not found."
+    exit 1
+  fi
 
   log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
   mkdir -p /etc/wireguard
@@ -812,10 +836,24 @@ EOF
   log_step "configure" "--- VPS2 Configuration Phase Complete ---"
 }
 
+do_push_key() {
+  PEER_IP="$1"
+  PEER_PASS="$2"
+  IFACE="$3"
+  if [ -z "$PEER_IP" ] || [ -z "$PEER_PASS" ]; then
+    log_step "push-key" "ERROR: Peer IP or Password missing."
+    exit 1
+  fi
+  PUB_KEY=$(cat /etc/wireguard/\${IFACE}.pub)
+  log_step "push-key" "Pushing \$IFACE public key to \$PEER_IP..."
+  sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"
+}
+
 case "$1" in
   prepare) do_prepare ;;
   configure) do_configure "$2" ;;
-  *) echo "Usage: $0 {prepare|configure} [peer_pub]"; exit 1 ;;
+  push-key) do_push_key "$2" "$3" "$4" ;;
+  *) echo "Usage: $0 {prepare|configure|push-key} [peer_pub]"; exit 1 ;;
 esac
 `,
       rollbackContent: `#!/bin/bash
@@ -1680,6 +1718,9 @@ ClientNames=${preSetupConfig.clientNames}
       if (res.code === 0 && res.stdout.trim()) {
         return res.stdout.trim();
       }
+      
+      const errorMsg = res.stderr || res.errorOutput || "File not found";
+      console.warn(`Method 1 (cat) failed for ${iface} on ${vps.ip}: ${errorMsg}`);
 
       // 2. Try wg show (works if interface is up)
       res = await sshExecute(vps, `wg show ${iface} public-key`);
@@ -1687,7 +1728,13 @@ ClientNames=${preSetupConfig.clientNames}
         return res.stdout.trim();
       }
       
-      // 3. Fallback: Try docker if it's wg0 (wg-easy)
+      // 3. Fallback: Try peer file (if pushed directly)
+      res = await sshExecute(vps, `cat /etc/wireguard/peer_${iface}.pub`);
+      if (res.code === 0 && res.stdout.trim()) {
+        return res.stdout.trim();
+      }
+      
+      // 4. Fallback: Try docker if it's wg0 (wg-easy)
       if (iface === 'wg0') {
         res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
         if (res.code === 0 && res.stdout.trim()) {
@@ -1695,10 +1742,10 @@ ClientNames=${preSetupConfig.clientNames}
         }
       }
       
-      return "";
-    } catch (e) {
-      console.error(`Failed to get public key for ${iface} on ${vps.ip}:`, e);
-      return "";
+      throw new Error(`Could not retrieve public key for ${iface}. Last error: ${res.stderr || res.errorOutput || 'Unknown'}`);
+    } catch (e: any) {
+      addLog(`Key Retrieval Error (${iface}): ${e.message}`, "error", vps.ip === activeTunnel.vps1.ip ? 'vps1' : 'vps2');
+      throw e;
     }
   };
 
@@ -1947,17 +1994,32 @@ ClientNames=${preSetupConfig.clientNames}
         addLog("VPS2 already prepared. Skipping preparation phase.", "success", "vps2");
       }
 
-      // --- Key Retrieval Phase ---
-      addLog("Phase 2: Out-of-band Key Exchange (via Public SSH)...", "info", "exchange");
+      // --- Key Retrieval & Direct Push Phase ---
+      addLog("Phase 2: Secure Key Exchange...", "info", "exchange");
       
-      addLog("Retrieving VPS1 Public Key...", "info", "exchange");
+      // 1. Push VPS1 key to VPS2
+      addLog("VPS1 pushing public key to VPS2 directly...", "cmd", "vps1");
+      const push1Res = await sshExecute(currentTunnel.vps1, `bash -s -- push-key "${currentTunnel.vps2.ip}" "${currentTunnel.vps2.password}" "wg1" << '_EOF_LODGEGUARD_'\n${vps1SetupRaw}\n_EOF_LODGEGUARD_`);
+      if (push1Res.code !== 0 && push1Res.code !== undefined) {
+        addLog(`Direct Key Push (VPS1->VPS2) failed: ${push1Res.stderr || push1Res.errorOutput}. Falling back to client retrieval.`, "error", "exchange");
+      } else {
+        addLog("VPS1 key pushed to VPS2 successfully.", "success", "exchange");
+      }
+
+      // 2. Push VPS2 key to VPS1
+      addLog("VPS2 pushing public key to VPS1 directly...", "cmd", "vps2");
+      const push2Res = await sshExecute(currentTunnel.vps2, `bash -s -- push-key "${currentTunnel.vps1.ip}" "${currentTunnel.vps1.password}" "wg0" << '_EOF_LODGEGUARD_'\n${vps2SetupRaw}\n_EOF_LODGEGUARD_`);
+      if (push2Res.code !== 0 && push2Res.code !== undefined) {
+        addLog(`Direct Key Push (VPS2->VPS1) failed: ${push2Res.stderr || push2Res.errorOutput}. Falling back to client retrieval.`, "error", "exchange");
+      } else {
+        addLog("VPS2 key pushed to VPS1 successfully.", "success", "exchange");
+      }
+
+      addLog("Retrieving keys for local configuration...", "info", "exchange");
       d_vps1_wg1_pub = await getVpsPublicKey(currentTunnel.vps1, 'wg1');
-      if (!d_vps1_wg1_pub) throw new Error("Failed to retrieve VPS1 Public Key.");
       addLog(`VPS1 Key: ${d_vps1_wg1_pub.substring(0, 10)}...`, "success", "exchange");
 
-      addLog("Retrieving VPS2 Public Key...", "info", "exchange");
       d_vps2_wg0_pub = await getVpsPublicKey(currentTunnel.vps2, 'wg0');
-      if (!d_vps2_wg0_pub) throw new Error("Failed to retrieve VPS2 Public Key.");
       addLog(`VPS2 Key: ${d_vps2_wg0_pub.substring(0, 10)}...`, "success", "exchange");
 
       // --- Phase 2.1: Inter-VPS SSH Handshake (User Requested) ---
