@@ -238,6 +238,7 @@ export default function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [isTestingConfig, setIsTestingConfig] = useState(false);
+  const [showManualScript, setShowManualScript] = useState(false);
   const cancelDeploymentRef = useRef(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   
@@ -509,6 +510,39 @@ log_step() {
   echo "$1"
 }
 
+wait_for_service() {
+  local service=$1
+  local max_attempts=15
+  local attempt=1
+  log_step "Waiting for $service to be active..."
+  while ! systemctl is-active --quiet "$service"; do
+    if [ $attempt -ge $max_attempts ]; then
+      log_step "ERROR: $service failed to start after $max_attempts attempts."
+      log_step "--- Service Status ---"
+      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
+      log_step "--- Recent Logs ---"
+      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
+      
+      if [ "$service" == "docker" ]; then
+        log_step "Attempting to fix Docker..."
+        fix_docker
+        # Retry once after fix
+        systemctl start docker || true
+        sleep 5
+        if systemctl is-active --quiet "docker"; then
+          log_step "Docker is now active after fix."
+          return 0
+        fi
+      fi
+      exit 1
+    fi
+    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
+    sleep 3
+    attempt=$((attempt + 1))
+  done
+  log_step "$service is now active."
+}
+
 collect_debug_info() {
   log_step "Collecting system debug information..."
   journalctl -n 200 > "$LOG_DIR/system_journal.txt"
@@ -541,12 +575,16 @@ fi
 
 wait_for_service() {
   local service=$1
-  local max_attempts=10
+  local max_attempts=15
   local attempt=1
   log_step "Waiting for $service to be active..."
   while ! systemctl is-active --quiet "$service"; do
     if [ $attempt -ge $max_attempts ]; then
       log_step "ERROR: $service failed to start after $max_attempts attempts."
+      log_step "--- Service Status ---"
+      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
+      log_step "--- Recent Logs ---"
+      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
       if [ "$service" == "docker" ]; then
         log_step "Attempting to fix Docker..."
         fix_docker
@@ -578,6 +616,8 @@ fix_docker() {
   # 2. Stop Docker and remove potentially corrupted data
   systemctl stop docker || true
   systemctl stop docker.socket || true
+  systemctl reset-failed docker || true
+  systemctl reset-failed docker.socket || true
   
   # 3. Check for conflicting files
   rm -rf /var/lib/docker/network/files/local-kv.db || true
@@ -602,7 +642,15 @@ fix_docker() {
   systemctl start docker || true
   
   if ! systemctl is-active --quiet "docker"; then
-    log_step "Docker still failed after repair. Rebooting might help."
+    log_step "Docker still failed after repair. Attempting purge and reinstall..."
+    apt-get purge -y docker.io docker-compose-v2 || true
+    rm -rf /var/lib/docker || true
+    apt-get install -y docker.io docker-compose-v2 || true
+    systemctl start docker || true
+  fi
+
+  if ! systemctl is-active --quiet "docker"; then
+    log_step "Docker still failed. Rebooting might help."
     echo "REBOOT_REQUIRED"
   fi
 }
@@ -638,8 +686,9 @@ if command -v snap &> /dev/null; then
 fi
 
 # Install with non-interactive flags
+# Use openresolv as it is more reliable for wg-quick on modern Ubuntu
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  wireguard iptables docker.io docker-compose-v2 resolvconf || true
+  wireguard iptables docker.io docker-compose-v2 openresolv || true
 
 log_step "Starting Docker daemon..."
 systemctl unmask docker.service || true
@@ -652,6 +701,8 @@ wait_for_service "docker"
 log_step "Cleaning up previous installations..."
 systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
 systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
+ip link delete wg0 2>/dev/null || true
+ip link delete wg1 2>/dev/null || true
 if command -v docker &> /dev/null; then
   docker stop wg-easy || true
   docker rm wg-easy || true
@@ -739,6 +790,7 @@ cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
+ListenPort = 51822
 MTU = 1280
 Table = off
 
@@ -862,6 +914,27 @@ log_step() {
   echo "$1"
 }
 
+wait_for_service() {
+  local service=$1
+  local max_attempts=15
+  local attempt=1
+  log_step "Waiting for $service to be active..."
+  while ! systemctl is-active --quiet "$service"; do
+    if [ $attempt -ge $max_attempts ]; then
+      log_step "ERROR: $service failed to start after $max_attempts attempts."
+      log_step "--- Service Status ---"
+      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
+      log_step "--- Recent Logs ---"
+      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
+      exit 1
+    fi
+    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
+    sleep 3
+    attempt=$((attempt + 1))
+  done
+  log_step "$service is now active."
+}
+
 collect_debug_info() {
   log_step "Collecting system debug information..."
   journalctl -n 200 > "$LOG_DIR/system_journal.txt"
@@ -892,6 +965,10 @@ wait_for_service() {
   while ! systemctl is-active --quiet "$service"; do
     if [ $attempt -ge $max_attempts ]; then
       log_step "ERROR: $service failed to start after $max_attempts attempts."
+      log_step "--- Service Status ---"
+      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
+      log_step "--- Recent Logs ---"
+      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
       exit 1
     fi
     log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
@@ -922,7 +999,7 @@ systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
 rm -rf /etc/wireguard || true
 
 log_step "Installing WireGuard and networking tools..."
-apt-get install -y wireguard iptables curl iproute2 resolvconf || true
+apt-get install -y wireguard iptables curl iproute2 openresolv || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
@@ -935,6 +1012,9 @@ sysctl -p || true
 log_step "Configuring WireGuard (wg0) as Exit Node..."
 mkdir -p /etc/wireguard
 cd /etc/wireguard
+
+# Cleanup existing interface
+ip link delete wg0 2>/dev/null || true
 
 # Generate or use existing keys
 if [ -f /etc/wireguard/wg0.key ]; then
@@ -1260,6 +1340,52 @@ sysctl -p
 
 echo "--- Full VPS Reset Complete. System is clean. ---" >> "$LOG_FILE"
 echo "--- Full VPS Reset Complete. System is clean. ---"
+`
+    },
+    {
+      id: 'docker-fix',
+      title: 'Docker Emergency Repair (docker-fix.sh)',
+      description: 'Forcefully resets the Docker daemon, removes corrupted state, and attempts a clean reinstall of the Docker engine.',
+      icon: ShieldAlert,
+      content: `#!/bin/bash
+# Double Tunnel - Docker Emergency Repair Script
+set -e
+
+echo "--- Initiating Docker Emergency Repair ---"
+
+# 1. Stop services and reset failed states
+systemctl stop docker.socket || true
+systemctl stop docker || true
+systemctl reset-failed docker || true
+systemctl reset-failed docker.socket || true
+
+# 2. Remove potentially corrupted data
+echo "Removing Docker state data..."
+rm -rf /var/lib/docker
+rm -rf /etc/docker/daemon.json
+
+# 3. Purge and Reinstall
+echo "Purging Docker packages..."
+apt-get purge -y docker.io docker-compose-v2
+apt-get autoremove -y
+
+echo "Reinstalling Docker..."
+apt-get update
+apt-get install -y docker.io docker-compose-v2
+
+# 4. Restart
+echo "Starting Docker..."
+systemctl unmask docker.service || true
+systemctl unmask docker.socket || true
+systemctl daemon-reload
+systemctl start docker.socket || true
+systemctl start docker || true
+
+if systemctl is-active --quiet docker; then
+    echo "[OK] Docker is now running successfully."
+else
+    echo "[ERROR] Docker still failed to start. A system reboot is highly recommended."
+fi
 `
     },
     {
@@ -3787,6 +3913,43 @@ PersistentKeepalive = 25`;
                             <span>WIPE & CLEAN INSTALL</span>
                           </button>
                         </div>
+
+                        {activeTunnel.status === 'failed' && (
+                          <div className="mt-4 p-4 bg-red-500/10 border border-red-500/20 rounded-xl">
+                            <div className="flex items-start gap-3">
+                              <AlertCircle className="w-5 h-5 text-red-500 mt-0.5" />
+                              <div className="flex-1">
+                                <h4 className="text-sm font-bold text-red-500 uppercase tracking-wider">Deployment Failed</h4>
+                                <p className="text-xs text-zinc-400 mt-1">
+                                  Automated setup encountered an error. You can try a "Clean Install" or run the manual setup script directly on your VPS.
+                                </p>
+                                <div className="flex flex-wrap gap-2 mt-3">
+                                  <button 
+                                    onClick={() => {
+                                      const script = INITIAL_SCRIPTS.find(s => s.id === 'manual-install');
+                                      if (script) {
+                                        navigator.clipboard.writeText(script.content);
+                                        addLog("Manual Setup Script copied to clipboard.", "success");
+                                      }
+                                    }}
+                                    className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-500 text-[10px] font-bold rounded-lg border border-red-500/30 transition-all flex items-center gap-1.5"
+                                  >
+                                    <Copy className="w-3 h-3" />
+                                    COPY MANUAL SCRIPT
+                                  </button>
+                                  <button 
+                                    onClick={() => startDeployment(true)}
+                                    className="px-3 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[10px] font-bold rounded-lg border border-zinc-700 transition-all flex items-center gap-1.5"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    RETRY CLEAN INSTALL
+                                  </button>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         <p className="text-[10px] text-zinc-500 text-center italic">
                           Tip: Type "fail" in VPS1 password to test the automated rollback feature.
                         </p>
