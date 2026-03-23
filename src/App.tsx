@@ -107,7 +107,7 @@ interface Tunnel {
   vps2: VPSConfig;
   status: 'idle' | 'deploying' | 'deployed' | 'failed';
   step: number;
-  logs: { msg: string, type: 'info' | 'success' | 'error' | 'cmd' }[];
+  logs: { msg: string, type: 'info' | 'success' | 'error' | 'cmd', vps?: 'vps1' | 'vps2' }[];
   peers: Peer[];
   createdAt: string;
 }
@@ -522,238 +522,107 @@ echo "Key rotation completed at $(date)" >> /root/DTLogs/lodgeguard-sync.txt
       description: 'Installs WG-Easy for Clients and a secondary tunnel to VPS2. Routes all Client traffic through VPS2.',
       icon: Binoculars,
       content: `#!/bin/bash
-# VPS1 Setup Script (Gateway) - IP: ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+# VPS1 Setup Script (Gateway) - IP: __VPS1_IP__
 set -e
 
 # Logging setup
 LOG_DIR="/root/DTLogs"
 LOG_FILE="$LOG_DIR/installation.txt"
 mkdir -p "$LOG_DIR"
-echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
-echo "Started at: $(date)" >> "$LOG_FILE"
 
 log_step() {
-  echo "[$(date)] $1" >> "$LOG_FILE"
-  echo "$1"
+  local action="$1"
+  local message="$2"
+  echo "[$(date)] [$action] $message" >> "$LOG_FILE"
+  echo "[$action] $message"
 }
 
-wait_for_service() {
-  local service=$1
-  local max_attempts=15
-  local attempt=1
-  log_step "Waiting for $service to be active..."
-  while ! systemctl is-active --quiet "$service"; do
-    if [ $attempt -ge $max_attempts ]; then
-      log_step "ERROR: $service failed to start after $max_attempts attempts."
-      log_step "--- Service Status ---"
-      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
-      log_step "--- Recent Logs ---"
-      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
-      
-      if [ "$service" == "docker" ]; then
-        log_step "Attempting to fix Docker..."
-        fix_docker
-        # Retry once after fix
-        systemctl start docker || true
-        sleep 5
-        if systemctl is-active --quiet "docker"; then
-          log_step "Docker is now active after fix."
-          return 0
-        fi
-      fi
-      exit 1
-    fi
-    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
-    sleep 3
-    attempt=$((attempt + 1))
-  done
-  log_step "$service is now active."
-}
+do_prepare() {
+  log_step "prepare" "--- Starting VPS1 Preparation Phase ---"
+  
+  fix_apt() {
+    log_step "prepare" "Fixing package manager (apt)..."
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
+    dpkg --configure -a || true
+    apt-get update || true
+  }
 
-collect_debug_info() {
-  log_step "Collecting system debug information..."
-  journalctl -n 200 > "$LOG_DIR/system_journal.txt"
-  journalctl -xeu docker.service > "$LOG_DIR/docker_journal.txt" || true
-  dmesg | tail -n 100 > "$LOG_DIR/dmesg.txt"
-  iptables -S > "$LOG_DIR/iptables_filter.txt"
-  iptables -t nat -S > "$LOG_DIR/iptables_nat.txt"
-  ip addr > "$LOG_DIR/ip_addr.txt"
-  ip route > "$LOG_DIR/ip_route.txt"
-  if command -v wg &> /dev/null; then
-    wg show > "$LOG_DIR/wireguard_status.txt"
-  fi
-  if command -v docker &> /dev/null; then
-    docker ps -a > "$LOG_DIR/docker_containers.txt"
-    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.txt" || true
-    docker info > "$LOG_DIR/docker_info.txt" || true
-  fi
-  log_step "Debug information collected in $LOG_DIR"
-}
-trap collect_debug_info EXIT
+  fix_apt
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
 
-# Helper to fix common package manager issues
-fix_apt() {
-  log_step "Fixing package manager (apt)..."
-  rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
-  dpkg --configure -a || true
+  log_step "prepare" "Installing Docker & WireGuard Tools..."
   apt-get update || true
-}
-
-log_step "--- Starting VPS1 Double VPN Setup ---"
-fix_apt
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
-
-# Disable needrestart prompts globally for this session
-if [ -f /etc/needrestart/needrestart.conf ]; then
-  sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf || true
-fi
-
-# --- Pre-Deployment Verification ---
-log_step "Verifying current system status..."
-if command -v docker &> /dev/null; then
-  if systemctl is-active --quiet docker; then
-    log_step "Docker is installed and running."
-    if docker ps | grep -q wg-easy; then
-      log_step "WG-Easy container is currently running."
-    else
-      log_step "WG-Easy container is NOT running."
-    fi
-  else
-    log_step "Docker is installed but NOT running."
-  fi
-else
-  log_step "Docker is NOT installed."
-fi
-# -----------------------------------
-
-fix_docker() {
-  log_step "Running Docker repair routine..."
-  # 1. Check for Snap Docker and purge it
-  if command -v snap &> /dev/null; then
-    log_step "Removing Snap Docker..."
-    snap remove docker || true
-  fi
+  apt-get install -y ca-certificates curl gnupg wireguard wireguard-tools iptables iproute2 || true
   
-  # 2. Stop Docker and remove potentially corrupted data
-  systemctl stop docker || true
-  systemctl stop docker.socket || true
-  systemctl reset-failed docker || true
-  systemctl reset-failed docker.socket || true
-  
-  # 3. Check for conflicting files
-  rm -rf /var/lib/docker/network/files/local-kv.db || true
-  
-  # 4. Ensure daemon.json is valid or reset it
-  if [ -f /etc/docker/daemon.json ]; then
-    log_step "Backing up and resetting /etc/docker/daemon.json..."
-    mv /etc/docker/daemon.json /etc/docker/daemon.json.bak || true
-  fi
-  
-  # 5. Check for AppArmor issues
-  if command -v apparmor_status &> /dev/null; then
-    log_step "Checking AppArmor status..."
-    aa-status || true
-  fi
-
-  # 6. Try to restart
-  systemctl unmask docker.service || true
-  systemctl unmask docker.socket || true
-  systemctl daemon-reload
-  systemctl start docker.socket || true
-  systemctl start docker || true
-  
-  if ! systemctl is-active --quiet "docker"; then
-    log_step "Docker still failed after repair. Attempting purge and reinstall..."
-    apt-get purge -y docker.io docker-ce docker-ce-cli containerd.io docker-compose-v2 || true
-    rm -rf /var/lib/docker || true
-    
-    # Reinstall using the most reliable method
-    if ! apt-get install -y docker.io; then
-       log_step "docker.io reinstall failed. Trying docker-ce..."
-       apt-get install -y ca-certificates gnupg lsb-release || true
-       mkdir -p /etc/apt/keyrings
-       curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
-       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null || true
-       apt-get update || true
-       apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
-    fi
-    apt-get install -y docker-compose-v2 || true
-    systemctl unmask docker.service || true
-    systemctl daemon-reload
-    systemctl start docker || true
-  fi
-
-  if ! systemctl is-active --quiet "docker"; then
-    log_step "Docker still failed. Rebooting might help."
-    echo "REBOOT_REQUIRED"
-  fi
-}
-
-# 1. Update & Install Official Docker
-log_step "Uninstalling old Docker versions..."
-apt-get remove -y docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc || true
-
-log_step "Installing Docker using official repository..."
-apt-get update || true
-apt-get install -y ca-certificates curl gnupg || true
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
-chmod a+r /etc/apt/keyrings/docker.asc || true
-# Add the repository to Apt sources:
-echo "Types: deb
+  # Docker Installation
+  if ! command -v docker &> /dev/null; then
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
+    chmod a+r /etc/apt/keyrings/docker.asc || true
+    echo "Types: deb
 URIs: https://download.docker.com/linux/ubuntu
 Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\")
 Components: stable
 Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.sources > /dev/null || true
+    apt-get update || true
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
+  fi
 
-apt-get update || true
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
+  systemctl enable docker || true
+  systemctl start docker || true
 
-log_step "Starting and verifying Docker..."
-systemctl enable docker || true
-systemctl start docker || true
-if ! docker run --rm hello-world | grep -q "Hello from Docker!"; then
-  log_step "WARNING: Docker hello-world verification failed, but continuing..."
-fi
-log_step "Checking if reboot is required after Docker installation..."
-if [ -f /var/run/reboot-required ]; then
-  log_step "System requires a reboot. Marking for reboot..."
-  echo "REBOOT_REQUIRED"
-fi
-# 2. Setup WG-Easy (Client Gateway)
-# Stop and remove previous versions
-log_step "Cleaning up previous installations..."
-systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
-systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
-ip link delete wg0 2>/dev/null || true
-ip link delete wg1 2>/dev/null || true
-if command -v docker &> /dev/null; then
-  docker stop wg-easy 2>/dev/null || true
-  docker rm wg-easy 2>/dev/null || true
-fi
-rm -rf /etc/wireguard /opt/wg-easy /etc/docker/containers/wg-easy || true
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg1)..."
+  mkdir -p /etc/wireguard
+  if [ ! -f /etc/wireguard/wg1.key ]; then
+    wg genkey | tee /etc/wireguard/wg1.key | wg pubkey > /etc/wireguard/wg1.pub
+  fi
+  echo "RESULT_WG1_PUB_KEY: $(cat /etc/wireguard/wg1.pub)"
+  
+  if [ -f /var/run/reboot-required ]; then
+    log_step "prepare" "System requires a reboot. Marking for reboot..."
+    echo "REBOOT_REQUIRED"
+  fi
+  
+  log_step "prepare" "--- VPS1 Preparation Phase Complete ---"
+}
 
-log_step "Configuring WG-Easy in /opt/wg-easy..."
-mkdir -p /opt/wg-easy
+do_configure() {
+  PEER_PUB="$1"
+  if [ -z "$PEER_PUB" ]; then
+    log_step "configure" "ERROR: No peer public key provided for wg1."
+    exit 1
+  fi
 
-cat <<'EOF' > /opt/wg-easy/docker-compose.yml
+  log_step "configure" "--- Starting VPS1 Configuration Phase ---"
+  
+  # 2. Setup WG-Easy (Client Gateway)
+  log_step "configure" "Cleaning up previous installations..."
+  systemctl stop wg-quick@wg0 wg-quick@wg1 2>/dev/null || true
+  if command -v docker &> /dev/null; then
+    docker stop wg-easy 2>/dev/null || true
+    docker rm wg-easy 2>/dev/null || true
+  fi
+
+  log_step "configure" "Configuring WG-Easy in /opt/wg-easy..."
+  mkdir -p /opt/wg-easy
+  cat <<EOF > /opt/wg-easy/docker-compose.yml
 services:
   wg-easy:
     environment:
-      - WG_HOST=${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+      - WG_HOST=__VPS1_IP__
       - WG_MTU=1280
       - PASSWORD=admin123
       - WG_DEFAULT_DNS=1.1.1.1
       - WG_ALLOWED_IPS=0.0.0.0/0
-      - WG_PORT=51820
+      - WG_PORT=__WG_EASY_PORT__
     image: ghcr.io/wg-easy/wg-easy
     container_name: wg-easy
     volumes:
       - .:/etc/wireguard
     ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
+      - "__WG_EASY_PORT__:__WG_EASY_PORT__/udp"
+      - "__WG_EASY_UI_PORT__:51821/tcp"
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
@@ -762,78 +631,31 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
 EOF
-cd /opt/wg-easy && docker compose up -d
+  cd /opt/wg-easy && docker compose up -d
 
-# 2. Enable IP Forwarding
-log_step "Enabling IP Forwarding..."
-sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -w net.ipv4.ip_forward=1 || true
-sysctl -p || true
+  log_step "configure" "Enabling IP Forwarding..."
+  sysctl -w net.ipv4.ip_forward=1 || true
+  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+  sysctl -p /etc/sysctl.d/99-wireguard.conf || true
 
-log_step "Verifying WG-Easy container status..."
-sleep 5
-if ! docker ps | grep -q wg-easy; then
-  log_step "ERROR: wg-easy container is NOT running."
-  log_step "--- Container Status (All) ---"
-  docker ps -a | grep wg-easy || true
-  log_step "--- WG-Easy Logs ---"
-  cd /opt/wg-easy && docker compose logs || docker logs wg-easy || true
-  exit 1
-fi
+  # 4. Setup VPS-to-VPS Tunnel (wg1)
+  log_step "configure" "Configuring VPS-to-VPS Tunnel (wg1) with Peer Key: $PEER_PUB"
+  if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
+    echo "200 vpn" >> /etc/iproute2/rt_tables
+  fi
 
-# 4. Setup VPS-to-VPS Tunnel (wg1)
-log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
-mkdir -p /etc/wireguard
-
-# Ensure routing table 200 exists
-if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
-  echo "200 vpn" >> /etc/iproute2/rt_tables
-fi
-
-# Generate or use existing keys
-log_step "Generating or retrieving WireGuard keys for VPS1..."
-if [ -f /etc/wireguard/wg1.key ]; then
-  log_step "Retrieving existing wg1 keys from /etc/wireguard/wg1.key..."
   PRIV_KEY=$(cat /etc/wireguard/wg1.key)
-else
-  log_step "Generating new wg1 keys for the gateway tunnel..."
-  PRIV_KEY=$(wg genkey)
-  echo "$PRIV_KEY" > /etc/wireguard/wg1.key
-fi
-PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
-echo "$PUB_KEY" > /etc/wireguard/wg1.pub
+  PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
+  PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
 
-log_step "Recording VPS1 configuration into /etc/wireguard/wg1.conf..."
-log_step "Exchanging keys: Recording VPS2's public key (__VPS2_WG0_PUB_KEY__) as the exit node peer."
-
-# Detect primary interface and IP to ensure management traffic bypasses the tunnel
-PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-if [ -z "$PRIMARY_IF" ]; then PRIMARY_IF="eth0"; fi
-
-# Robust IP detection
-PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
-if [ -z "$PRIMARY_IP" ]; then
-  PRIMARY_IP=$(hostname -I | awk '{print $1}')
-fi
-
-log_step "Detected Primary Interface: $PRIMARY_IF, Primary IP: $PRIMARY_IP"
-
-if [ -z "$PRIMARY_IP" ]; then
-  log_step "ERROR: Could not detect primary IP address. Lockout protection cannot be configured."
-  exit 1
-fi
-
-cat <<EOF > /etc/wireguard/wg1.conf
+  cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
-ListenPort = 51822
+ListenPort = __WG_INTER_VPS_PORT__
 MTU = 1280
 Table = off
 
-# POLICY-BASED ROUTING: Only route VPN client traffic through VPS2
-# This prevents host SSH lockout and fixes "Bad Gateway" issues
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 || true
 PostUp = ip rule add from 10.9.0.1 table 200 || true
@@ -849,105 +671,42 @@ PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
 
 [Peer]
-PublicKey = __VPS2_WG0_PUB_KEY__
-Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51820
+PublicKey = $PEER_PUB
+Endpoint = __VPS2_IP__:__WG_EXIT_PORT__
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
-log_step "Starting wg1 interface..."
-systemctl enable wg-quick@wg1 || true
-if ! systemctl start wg-quick@wg1; then
-  log_step "ERROR: wg-quick@wg1 failed to start via systemd. Attempting manual start for diagnostics..."
-  wg-quick up wg1 || true
-  log_step "--- wg1 Status ---"
-  wg show wg1 || true
-  log_step "--- System Logs ---"
-  journalctl -xeu wg-quick@wg1 -n 50 >> "$LOG_FILE" 2>&1 || true
-fi
-wait_for_service "wg-quick@wg1"
+  log_step "configure" "Starting WireGuard wg1..."
+  systemctl enable wg-quick@wg1 || true
+  systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
 
-# Output keys for the app to capture
-echo "RESULT_WG1_PUB_KEY: $PUB_KEY"
-log_step "Waiting for wg-easy to be ready for key capture..."
-WG0_PUB=""
-for i in {1..12}; do
-  if docker exec wg-easy wg show wg0 public-key &>/dev/null; then
-    WG0_PUB=$(docker exec wg-easy wg show wg0 public-key)
-    if [ -n "$WG0_PUB" ]; then
-      log_step "wg-easy public key captured on attempt $i"
-      break
+  # Wait for wg-easy to generate its key
+  WG0_PUB=""
+  for i in {1..10}; do
+    if docker exec wg-easy wg show wg0 public-key &>/dev/null; then
+      WG0_PUB=$(docker exec wg-easy wg show wg0 public-key)
+      if [ -n "$WG0_PUB" ]; then break; fi
     fi
-  fi
-  log_step "Waiting for wg-easy... (attempt $i/12)"
-  sleep 5
-done
-echo "RESULT_WG0_PUB_KEY: $WG0_PUB"
+    sleep 2
+  done
+  echo "RESULT_WG0_PUB_KEY: $WG0_PUB"
 
-# 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
-log_step "Configuring IPTables routing rules..."
-# Use the detected primary interface
-PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
+  log_step "configure" "--- VPS1 Configuration Phase Complete ---"
+}
 
-# Default policy to ACCEPT to prevent lockout during transition
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
-
-# Flush existing rules to start clean
-iptables -F
-iptables -t nat -F
-
-# Allow SSH (Port 22) - CRITICAL for management
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-
-# Allow established and related connections
-iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
-iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-# Allow Loopback
-iptables -A INPUT -i lo -j ACCEPT
-
-# WireGuard Ports
-iptables -A INPUT -p udp --dport 51820 -j ACCEPT
-iptables -A INPUT -p udp --dport 51822 -j ACCEPT
-
-# Routing logic - Forward client traffic to wg1
-iptables -A FORWARD -s 10.8.0.0/24 -o wg1 -j ACCEPT
-iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wg1 -j MASQUERADE
-
-# Ensure SSH remains accessible on physical interface
-iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE
-
-# Save rules
-log_step "Saving IPTables rules permanently..."
-netfilter-persistent save || true
-
-# Final check for reboot requirement
-if [ -f /var/run/reboot-required ]; then
-  log_step "System requires a reboot to complete installation."
-  echo "REBOOT_REQUIRED"
-fi
-
-log_step "--- VPS1 Double VPN Setup Complete ---"
+case "$1" in
+  prepare) do_prepare ;;
+  configure) do_configure "$2" ;;
+  *) echo "Usage: $0 {prepare|configure} [peer_pub]"; exit 1 ;;
+esac
 `,
       rollbackContent: `#!/bin/bash
 # VPS1 Rollback Script
-echo "--- Initiating VPS1 Rollback ---"
-# Ensure policies are ACCEPT before flushing
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
-iptables -t nat -F
-iptables -F
 systemctl stop wg-quick@wg1 || true
 systemctl disable wg-quick@wg1 || true
 cd /opt/wg-easy && docker compose down || true
-rm -rf /opt/wg-easy
-rm -f /etc/wireguard/wg1.conf
-iptables -t nat -F
-iptables -F
-echo "--- VPS1 Rollback Complete ---"
+rm -rf /opt/wg-easy /etc/wireguard/wg1.*
 `
     },
     {
@@ -956,230 +715,110 @@ echo "--- VPS1 Rollback Complete ---"
       description: 'Configures VPS2 as the final exit point for all traffic.',
       icon: Binoculars,
       content: `#!/bin/bash
-# VPS2 Setup Script (Exit Node) - IP: ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
+# VPS2 Setup Script (Exit Node) - IP: __VPS2_IP__
+set -e
 
 # Logging setup
 LOG_DIR="/root/DTLogs"
 LOG_FILE="$LOG_DIR/installation.txt"
 mkdir -p "$LOG_DIR"
-echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
-echo "Started at: $(date)" >> "$LOG_FILE"
 
 log_step() {
-  echo "[$(date)] $1" >> "$LOG_FILE"
-  echo "$1"
+  local action="$1"
+  local message="$2"
+  echo "[$(date)] [$action] $message" >> "$LOG_FILE"
+  echo "[$action] $message"
 }
 
-# Error handling
-error_handler() {
-  local line_no=$1
-  log_step "CRITICAL ERROR: Script failed at line $line_no"
-  collect_debug_info
-  exit 1
-}
-trap 'error_handler $LINENO' ERR
+do_prepare() {
+  log_step "prepare" "--- Starting VPS2 Preparation Phase ---"
+  
+  fix_apt() {
+    log_step "prepare" "Fixing package manager (apt)..."
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
+    dpkg --configure -a || true
+    apt-get update || true
+  }
 
-wait_for_service() {
-  local service=$1
-  local max_attempts=15
-  local attempt=1
-  log_step "Waiting for $service to be active..."
-  while ! systemctl is-active --quiet "$service"; do
-    if [ $attempt -ge $max_attempts ]; then
-      log_step "ERROR: $service failed to start after $max_attempts attempts."
-      log_step "--- Service Status ---"
-      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
-      log_step "--- Recent Logs ---"
-      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
-      exit 1
-    fi
-    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
-    sleep 3
-    attempt=$((attempt + 1))
-  done
-  log_step "$service is now active."
-}
+  fix_apt
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
 
-collect_debug_info() {
-  log_step "Collecting system debug information..."
-  journalctl -n 200 > "$LOG_DIR/system_journal.txt"
-  dmesg | tail -n 100 > "$LOG_DIR/dmesg.txt"
-  iptables -S > "$LOG_DIR/iptables_filter.txt"
-  iptables -t nat -S > "$LOG_DIR/iptables_nat.txt"
-  ip addr > "$LOG_DIR/ip_addr.txt"
-  ip route > "$LOG_DIR/ip_route.txt"
-  if command -v wg &> /dev/null; then
-    wg show > "$LOG_DIR/wireguard_status.txt"
-  fi
-  if command -v docker &> /dev/null; then
-    docker ps -a > "$LOG_DIR/docker_containers.txt"
-  fi
-  log_step "Debug information collected in $LOG_DIR"
-}
-
-# Helper to fix common package manager issues
-fix_apt() {
-  log_step "Fixing package manager (apt)..."
-  rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
-  dpkg --configure -a || true
+  log_step "prepare" "Installing WireGuard & Tools..."
   apt-get update || true
+  apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
+
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
+  mkdir -p /etc/wireguard
+  if [ ! -f /etc/wireguard/wg0.key ]; then
+    wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
+  fi
+  echo "RESULT_WG0_PUB_KEY: $(cat /etc/wireguard/wg0.pub)"
+  
+  if [ -f /var/run/reboot-required ]; then
+    log_step "prepare" "System requires a reboot. Marking for reboot..."
+    echo "REBOOT_REQUIRED"
+  fi
+  
+  log_step "prepare" "--- VPS2 Preparation Phase Complete ---"
 }
 
-log_step "--- Starting VPS2 Exit Node Setup ---"
-fix_apt
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
+do_configure() {
+  PEER_PUB="$1"
+  if [ -z "$PEER_PUB" ]; then
+    log_step "configure" "ERROR: No peer public key provided for wg0."
+    exit 1
+  fi
 
-# 1. Update & Install Official Docker
-log_step "Uninstalling old Docker versions..."
-apt-get remove -y docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc || true
+  log_step "configure" "--- Starting VPS2 Configuration Phase ---"
+  
+  log_step "configure" "Enabling IP Forwarding..."
+  sysctl -w net.ipv4.ip_forward=1 || true
+  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+  sysctl -p /etc/sysctl.d/99-wireguard.conf || true
 
-log_step "Installing Docker using official repository..."
-apt-get update || true
-apt-get install -y ca-certificates curl gnupg || true
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
-chmod a+r /etc/apt/keyrings/docker.asc || true
+  log_step "configure" "Configuring WireGuard (wg0) as Exit Node with Peer Key: $PEER_PUB"
+  mkdir -p /etc/wireguard
+  systemctl stop wg-quick@wg0 2>/dev/null || true
 
-echo "Types: deb
-URIs: https://download.docker.com/linux/ubuntu
-Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\")
-Components: stable
-Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.sources > /dev/null || true
-
-apt-get update || true
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
-
-log_step "Starting and verifying Docker..."
-systemctl enable docker || true
-systemctl start docker || true
-
-log_step "Installing WireGuard and networking tools..."
-if ! apt-get install -y openresolv; then
-  apt-get install -y resolvconf || true
-fi
-apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
-
-# 2. Enable IP Forwarding
-log_step "Enabling IP Forwarding..."
-sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -w net.ipv4.ip_forward=1 || true
-sysctl -p || true
-
-# 3. Setup WireGuard (wg0)
-log_step "Configuring WireGuard (wg0) as Exit Node..."
-mkdir -p /etc/wireguard
-cd /etc/wireguard
-
-# Cleanup existing interface
-log_step "Cleaning up existing wg0 interface..."
-wg-quick down wg0 2>/dev/null || true
-ip link delete wg0 2>/dev/null || true
-
-# Generate or use existing keys
-log_step "Generating or retrieving WireGuard keys..."
-if [ -f /etc/wireguard/wg0.key ]; then
   PRIV_KEY=$(cat /etc/wireguard/wg0.key)
-else
-  PRIV_KEY=$(wg genkey)
-  echo "$PRIV_KEY" > /etc/wireguard/wg0.key
-fi
-PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
-echo "$PUB_KEY" > /etc/wireguard/wg0.pub
+  PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
 
-log_step "Recording VPS2 configuration into /etc/wireguard/wg0.conf..."
-cat <<EOF > /etc/wireguard/wg0.conf
+  cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.254/24
-ListenPort = 51820
+ListenPort = __WG_EXIT_PORT__
 MTU = 1280
 
-# EXIT NODE ROUTING: Forward traffic from VPS1 to the Internet
 PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
-PostUp = iptables -t nat -A POSTROUTING -o \$(ip route | grep default | awk '{print \$5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PostUp = iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
-PreDown = iptables -t nat -D POSTROUTING -o \$(ip route | grep default | awk '{print \$5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PreDown = iptables -t nat -D POSTROUTING -o $PRIMARY_IF -j MASQUERADE || true
 
 [Peer]
-PublicKey = __VPS1_WG1_PUB_KEY__
+PublicKey = $PEER_PUB
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
 
-log_step "Starting wg0 interface..."
-systemctl enable wg-quick@wg0 || true
-if ! systemctl start wg-quick@wg0; then
-  log_step "ERROR: wg-quick@wg0 failed to start. Attempting manual start..."
-  wg-quick up wg0 || true
-fi
+  log_step "configure" "Starting WireGuard wg0..."
+  systemctl enable wg-quick@wg0 || true
+  systemctl restart wg-quick@wg0 || wg-quick up wg0 || true
 
-# Output keys for the app to capture
-echo "RESULT_WG0_PUB_KEY: $PUB_KEY"
+  log_step "configure" "--- VPS2 Configuration Phase Complete ---"
+}
 
-# 4. EXIT NODE ROUTING (Tunnel -> Internet)
-log_step "Configuring IPTables routing rules..."
-# Detect primary interface
-PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
-if [ -z "$PRIMARY_IF" ]; then PRIMARY_IF="eth0"; fi
-
-# Default policy to ACCEPT to prevent lockout
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
-
-# Flush existing rules
-iptables -F
-iptables -t nat -F
-
-# Allow SSH (Port 22) - CRITICAL
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-
-# Allow established and related connections
-iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
-iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
-
-# Allow Loopback
-iptables -A INPUT -i lo -j ACCEPT
-
-# WireGuard Port
-iptables -A INPUT -p udp --dport 51820 -j ACCEPT
-
-# Routing logic
-iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o $PRIMARY_IF -j MASQUERADE
-iptables -A FORWARD -i wg0 -o $PRIMARY_IF -j ACCEPT
-
-# Save rules
-log_step "Saving IPTables rules permanently..."
-export DEBIAN_FRONTEND=noninteractive
-echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
-echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
-apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" iptables-persistent
-netfilter-persistent save || true
-
-# Final check for reboot requirement
-if [ -f /var/run/reboot-required ]; then
-  log_step "System requires a reboot to complete installation."
-  echo "REBOOT_REQUIRED"
-fi
-
-log_step "--- VPS2 Exit Node Setup Complete ---"
+case "$1" in
+  prepare) do_prepare ;;
+  configure) do_configure "$2" ;;
+  *) echo "Usage: $0 {prepare|configure} [peer_pub]"; exit 1 ;;
+esac
 `,
       rollbackContent: `#!/bin/bash
 # VPS2 Rollback Script
-echo "--- Initiating VPS2 Rollback ---"
-# Ensure policies are ACCEPT before flushing
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
-iptables -t nat -F
-iptables -F
 systemctl stop wg-quick@wg0 || true
 systemctl disable wg-quick@wg0 || true
-rm -f /etc/wireguard/wg0.conf
-iptables -t nat -F
-iptables -F
-echo "--- VPS2 Rollback Complete ---"
+rm -f /etc/wireguard/wg0.*
 `
     },
     {
@@ -1250,7 +889,7 @@ else
 fi
 
 # 6. Check for Port Conflicts (Standard Ports)
-for port in 22 51820 51821 51822; do
+for port in 22 __WG_EASY_PORT__ __WG_EASY_UI_PORT__ __WG_INTER_VPS_PORT__ __WG_EXIT_PORT__; do
   if ss -tuln | grep -q ":$port "; then
     if [ "$port" -eq 22 ]; then
       log_msg "[OK] Port 22 (SSH) is active (Required for management)."
@@ -1333,7 +972,7 @@ fi
 
 # 8. Port Check
 echo "[7/7] Checking standard ports..."
-for port in 22 51820 51821 51822; do
+for port in 22 __WG_EASY_PORT__ __WG_EASY_UI_PORT__ __WG_INTER_VPS_PORT__ __WG_EXIT_PORT__; do
     if ss -tuln | grep -q ":$port "; then
         echo "[INFO] Port $port is in use."
     else
@@ -1892,8 +1531,8 @@ ClientNames=${preSetupConfig.clientNames}
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, ...updates } : t));
   };
 
-  const addLog = (msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info') => {
-    setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type }] } : t));
+  const addLog = (msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info', vps?: 'vps1' | 'vps2') => {
+    setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type, vps }] } : t));
   };
 
   const sshExecute = async (vps: VPSConfig, command: string) => {
@@ -1971,19 +1610,19 @@ ClientNames=${preSetupConfig.clientNames}
 
   const getVpsPublicKey = async (vps: VPSConfig, iface: string) => {
     try {
-      // Try wg show first (works if interface is up)
-      let res = await sshExecute(vps, `wg show ${iface} public-key`);
-      if (res.code === 0 && res.stdout.trim()) {
-        return res.stdout.trim();
-      }
-      
-      // Fallback: Try reading the .pub file (works even if interface is down)
-      res = await sshExecute(vps, `cat /etc/wireguard/${iface}.pub`);
+      // 1. Try reading the .pub file (most reliable before interface is up)
+      let res = await sshExecute(vps, `cat /etc/wireguard/${iface}.pub`);
       if (res.code === 0 && res.stdout.trim()) {
         return res.stdout.trim();
       }
 
-      // Fallback: Try docker if it's wg0 (wg-easy)
+      // 2. Try wg show (works if interface is up)
+      res = await sshExecute(vps, `wg show ${iface} public-key`);
+      if (res.code === 0 && res.stdout.trim()) {
+        return res.stdout.trim();
+      }
+      
+      // 3. Fallback: Try docker if it's wg0 (wg-easy)
       if (iface === 'wg0') {
         res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
         if (res.code === 0 && res.stdout.trim()) {
@@ -1999,7 +1638,8 @@ ClientNames=${preSetupConfig.clientNames}
   };
 
   const rebootVpsAndWait = async (vps: VPSConfig, vpsName: string) => {
-    addLog(`Initiating reboot for ${vpsName}...`, "info");
+    const vpsKey = vps.ip === activeTunnel.vps1.ip ? 'vps1' : 'vps2';
+    addLog(`Initiating reboot for ${vpsName}...`, "info", vpsKey);
     try {
       // Send reboot command and ignore the inevitable disconnection error
       await sshExecute(vps, "reboot");
@@ -2007,7 +1647,7 @@ ClientNames=${preSetupConfig.clientNames}
       // Expected disconnection
     }
     
-    addLog(`Waiting for ${vpsName} to come back online (this may take up to 2 minutes)...`, "info");
+    addLog(`Waiting for ${vpsName} to come back online (this may take up to 2 minutes)...`, "info", vpsKey);
     
     // Wait for 15 seconds before starting to check (give it time to actually shut down)
     await new Promise(r => setTimeout(r, 15000));
@@ -2031,7 +1671,7 @@ ClientNames=${preSetupConfig.clientNames}
       throw new Error(`${vpsName} failed to come back online after reboot. Please check it manually.`);
     }
     
-    addLog(`${vpsName} is back online. Resuming deployment...`, "success");
+    addLog(`${vpsName} is back online. Resuming deployment...`, "success", vpsKey);
   };
 
   const isVpsDeployed = async (vps: VPSConfig, interfaces: string[]) => {
@@ -2047,7 +1687,7 @@ ClientNames=${preSetupConfig.clientNames}
     }
   };
 
-  const startDeployment = async (isCleanInstall: boolean = false) => {
+    const startDeployment = async (isCleanInstall: boolean = false) => {
     if (!activeTunnel.vps1.password || !activeTunnel.vps2.password) {
       alert("Please provide root passwords for both servers.");
       return;
@@ -2063,6 +1703,9 @@ ClientNames=${preSetupConfig.clientNames}
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
     addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info");
 
+    // Use a local object to track state during deployment to avoid closure issues
+    let currentTunnel = { ...activeTunnel };
+
     try {
       // Helper to check for cancellation
       const checkCancel = () => {
@@ -2076,27 +1719,29 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Phase 0: Pre-Deployment Connection Verification...", "info");
       
       updateActiveTunnel({ 
-        vps1: { ...activeTunnel.vps1, connectionStatus: 'testing' },
-        vps2: { ...activeTunnel.vps2, connectionStatus: 'testing' }
+        vps1: { ...currentTunnel.vps1, connectionStatus: 'testing' },
+        vps2: { ...currentTunnel.vps2, connectionStatus: 'testing' }
       });
 
-      addLog(`Verifying connection to VPS1 (${activeTunnel.vps1.ip})...`, "cmd");
-      const vps1Check = await sshExecute(activeTunnel.vps1, "echo 'Connection Verified'");
+      addLog(`Verifying connection to VPS1 (${currentTunnel.vps1.ip})...`, "cmd", "vps1");
+      const vps1Check = await sshExecute(currentTunnel.vps1, "echo 'Connection Verified'");
       if (vps1Check.code !== 0 && vps1Check.code !== undefined) {
-        updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
+        updateActiveTunnel({ vps1: { ...currentTunnel.vps1, connectionStatus: 'error' } });
         throw new Error(`VPS1 Connection Verification Failed: ${vps1Check.stderr || vps1Check.errorOutput || 'Unknown SSH Error'}`);
       }
-      updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'success' } });
-      addLog("VPS1 Connection Verified!", "success");
+      currentTunnel.vps1.connectionStatus = 'success';
+      updateActiveTunnel({ vps1: { ...currentTunnel.vps1, connectionStatus: 'success' } });
+      addLog("VPS1 Connection Verified!", "success", "vps1");
 
-      addLog(`Verifying connection to VPS2 (${activeTunnel.vps2.ip})...`, "cmd");
-      const vps2Check = await sshExecute(activeTunnel.vps2, "echo 'Connection Verified'");
+      addLog(`Verifying connection to VPS2 (${currentTunnel.vps2.ip})...`, "cmd", "vps2");
+      const vps2Check = await sshExecute(currentTunnel.vps2, "echo 'Connection Verified'");
       if (vps2Check.code !== 0 && vps2Check.code !== undefined) {
-        updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
+        updateActiveTunnel({ vps2: { ...currentTunnel.vps2, connectionStatus: 'error' } });
         throw new Error(`VPS2 Connection Verification Failed: ${vps2Check.stderr || vps2Check.errorOutput || 'Unknown SSH Error'}`);
       }
-      updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'success' } });
-      addLog("VPS2 Connection Verified!", "success");
+      currentTunnel.vps2.connectionStatus = 'success';
+      updateActiveTunnel({ vps2: { ...currentTunnel.vps2, connectionStatus: 'success' } });
+      addLog("VPS2 Connection Verified!", "success", "vps2");
 
       addLog("All connections verified. Proceeding with deployment.", "success");
 
@@ -2105,12 +1750,12 @@ ClientNames=${preSetupConfig.clientNames}
         
         const resetScript = INITIAL_SCRIPTS.find(s => s.id === 'full-wipe')?.content || '';
         
-        addLog(`Resetting VPS1 (${activeTunnel.vps1.ip})...`, "cmd");
-        const res1 = await sshExecute(activeTunnel.vps1, resetScript);
+        addLog(`Resetting VPS1 (${currentTunnel.vps1.ip})...`, "cmd", "vps1");
+        const res1 = await sshExecute(currentTunnel.vps1, resetScript);
         if (res1.code !== 0 && res1.code !== undefined) throw new Error(`VPS1 Reset Failed: ${res1.stderr || res1.errorOutput}`);
         
-        addLog(`Resetting VPS2 (${activeTunnel.vps2.ip})...`, "cmd");
-        const res2 = await sshExecute(activeTunnel.vps2, resetScript);
+        addLog(`Resetting VPS2 (${currentTunnel.vps2.ip})...`, "cmd", "vps2");
+        const res2 = await sshExecute(currentTunnel.vps2, resetScript);
         if (res2.code !== 0 && res2.code !== undefined) throw new Error(`VPS2 Reset Failed: ${res2.stderr || res2.errorOutput}`);
         
         addLog("Full System Reset Complete.", "success");
@@ -2120,54 +1765,55 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Starting Port Verification Phase...", "info");
 
       const checkPorts = async (vpsName: string, vpsKey: 'vps1' | 'vps2') => {
-        addLog(`Verifying ports on ${vpsName} (${activeTunnel[vpsKey].ip})...`, "info");
+        addLog(`Verifying ports on ${vpsName} (${currentTunnel[vpsKey].ip})...`, "info", vpsKey);
         
-        const standardPorts = [
+        const standardPorts = vpsKey === 'vps1' ? [
           { port: 22, service: 'SSH', purpose: 'Remote Management' },
-          { port: 51820, service: 'WireGuard', purpose: 'VPN Tunneling' },
-          { port: 51821, service: 'WireGuard (Internal)', purpose: 'Double VPN Inter-node Communication' },
-          { port: 51822, service: 'WG-Easy UI', purpose: 'Web Management Interface' }
+          { port: 51820, service: 'WG_EASY_PORT', purpose: 'Client VPN Port' },
+          { port: 51821, service: 'WG_EASY_UI_PORT', purpose: 'WG-Easy Web UI' },
+          { port: 51822, service: 'WG_INTER_VPS_PORT', purpose: 'Inter-VPS Tunnel Port' }
+        ] : [
+          { port: 22, service: 'SSH', purpose: 'Remote Management' },
+          { port: 51820, service: 'WG_EXIT_PORT', purpose: 'Inter-VPS Exit Port' }
         ];
 
         const conflicts: { port: number, service: string, purpose: string }[] = [];
         const assignedPorts: { [key: string]: number } = {};
 
         for (const p of standardPorts) {
-          addLog(`Checking port ${p.port} (${p.service})...`, "cmd");
+          addLog(`Checking port ${p.port} (${p.service})...`, "cmd", vpsKey);
           
           try {
-            // Real SSH check for port availability
             const checkCmd = `ss -tuln | grep -q ":${p.port} " && echo "occupied" || echo "free"`;
-            const res = await sshExecute(activeTunnel[vpsKey], checkCmd);
+            const res = await sshExecute(currentTunnel[vpsKey], checkCmd);
             const status = (res.stdout || "").trim();
 
             if (status === 'occupied') {
               if (p.port === 22) {
-                addLog(`Port 22 (SSH) is active. Required for management.`, "success");
+                addLog(`Port 22 (SSH) is active. Required for management.`, "success", vpsKey);
                 assignedPorts[p.service] = p.port;
               } else {
-                addLog(`Conflict detected on port ${p.port}!`, "error");
+                addLog(`Conflict detected on port ${p.port}!`, "error", vpsKey);
                 const newPort = p.port + 1000 + Math.floor(Math.random() * 100);
-                addLog(`Reassigning ${p.service} to port ${newPort}...`, "success");
-                conflicts.push({ port: p.port, service: 'Unknown', purpose: `Original port for ${p.service} occupied.` });
+                addLog(`Reassigning ${p.service} to port ${newPort}...`, "success", vpsKey);
+                conflicts.push({ port: p.port, service: p.service, purpose: `Original port occupied.` });
                 assignedPorts[p.service] = newPort;
               }
             } else {
-              addLog(`Port ${p.port} is available.`, "success");
+              addLog(`Port ${p.port} is available.`, "success", vpsKey);
               assignedPorts[p.service] = p.port;
             }
           } catch (err: any) {
-            addLog(`Failed to check port ${p.port}: ${err.message}`, "error");
-            // Fallback to standard port if check fails
+            addLog(`Failed to check port ${p.port}: ${err.message}`, "error", vpsKey);
             assignedPorts[p.service] = p.port;
           }
         }
 
+        currentTunnel[vpsKey].ports = assignedPorts;
+        currentTunnel[vpsKey].portConflicts = conflicts;
         updateActiveTunnel({ 
           [vpsKey]: { 
-            ...activeTunnel[vpsKey], 
-            ports: assignedPorts,
-            portConflicts: conflicts 
+            ...currentTunnel[vpsKey]
           } 
         });
       };
@@ -2180,226 +1826,141 @@ ClientNames=${preSetupConfig.clientNames}
       // --- Key Generation Phase ---
       addLog("Preparing WireGuard keys...", "info");
       
-      // Pre-generate keys if they don't exist to avoid "chicken and egg" problem
-      let d_vps1_wg0_priv = "";
       let d_vps1_wg0_pub = "";
-      let d_vps1_wg1_priv = "";
       let d_vps1_wg1_pub = "";
-      let d_vps2_wg0_priv = "";
       let d_vps2_wg0_pub = "";
 
-      // Helper to generate a key pair
-      const generateKeyPair = () => {
-        const priv = generateWGKey();
-        // We can't easily generate the public key from the private key in JS without a library,
-        // so we'll let the VPS generate its own keys if we don't have them, 
-        // OR we can just generate the private key here and let the VPS derive the public one.
-        // Actually, the best way is to let the VPS generate its own keys and then sync them.
-        // BUT to fix the "wg-quick won't start" issue, we need the PEER's public key.
-        return priv;
-      };
+      // --- VPS Preparation Phase ---
+      addLog("Phase 1: System Preparation (Docker & Dependencies)...", "info");
+      let vps2SetupRaw = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
+      let vps1SetupRaw = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
 
-      // If we're doing a clean install, we'll generate new private keys to inject
-      // This allows us to know the public keys (by deriving them on the VPS) 
-      // but we still have the problem of knowing the public key BEFORE the other VPS is up.
-      
-      // REVISED STRATEGY: 
-      // 1. We'll use the existing keys if available.
-      // 2. If not, we'll generate placeholders that are VALID keys.
-      const placeholderKey = "mP8vW9R/X6l2Y7z4vW9R/X6l2Y7z4vW9R/X6l2Y7z4A=";
+      // Inject IPs into scripts
+      vps1SetupRaw = vps1SetupRaw.replaceAll('__VPS1_IP__', currentTunnel.vps1.ip)
+                                 .replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
+                                 .replaceAll('__WG_EASY_PORT__', (currentTunnel.vps1.ports?.['WG_EASY_PORT'] || 51820).toString())
+                                 .replaceAll('__WG_EASY_UI_PORT__', (currentTunnel.vps1.ports?.['WG_EASY_UI_PORT'] || 51821).toString())
+                                 .replaceAll('__WG_INTER_VPS_PORT__', (currentTunnel.vps1.ports?.['WG_INTER_VPS_PORT'] || 51822).toString())
+                                 .replaceAll('__WG_EXIT_PORT__', (currentTunnel.vps2.ports?.['WG_EXIT_PORT'] || 51820).toString());
 
-      // --- VPS2 Deployment ---
-      addLog("Checking if VPS2 (Exit Node) is already deployed...", "info");
-      const vps2AlreadyDeployed = await isVpsDeployed(activeTunnel.vps2, ['wg0']);
-      
-      if (vps2AlreadyDeployed && !isCleanInstall) {
+      vps2SetupRaw = vps2SetupRaw.replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
+                                 .replaceAll('__WG_EXIT_PORT__', (currentTunnel.vps2.ports?.['WG_EXIT_PORT'] || 51820).toString());
+
+      // 1. Prepare VPS1
+      addLog("Checking if VPS1 (Gateway) preparation is needed...", "info", "vps1");
+      const vps1AlreadyDeployed = await isVpsDeployed(currentTunnel.vps1, ['wg0', 'wg1']);
+      if (!vps1AlreadyDeployed || isCleanInstall) {
         checkCancel();
-        addLog("VPS2 (Exit Node) is already deployed and active. Fetching existing keys...", "success");
-        d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+        addLog("Preparing VPS1 (Gateway): Installing Docker, WG-Easy & Tools...", "info", "vps1");
+        const vps1PrepareRes = await sshExecute(currentTunnel.vps1, `bash -s -- prepare << '_EOF_LODGEGUARD_'\n${vps1SetupRaw}\n_EOF_LODGEGUARD_`);
+        if (vps1PrepareRes.stdout.includes("REBOOT_REQUIRED")) {
+          await rebootVpsAndWait(currentTunnel.vps1, "VPS1 (Gateway)");
+          addLog("VPS1 rebooted and ready for configuration.", "success", "vps1");
+        } else if (vps1PrepareRes.code !== 0 && vps1PrepareRes.code !== undefined) {
+          throw new Error(`VPS1 Preparation Failed (Code ${vps1PrepareRes.code}): ${vps1PrepareRes.stderr || vps1PrepareRes.errorOutput}`);
+        }
+        addLog("VPS1 Preparation Complete.", "success", "vps1");
       } else {
-        checkCancel();
-        if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS2...", "info");
-        addLog("Initiating deployment for VPS2 (Exit Node)...", "info");
-        
-        let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
-        
-        // We still don't know VPS1's key yet if it's a fresh install.
-        // So we'll deploy VPS2, get its key, then deploy VPS1 with VPS2's key.
-        // THEN we'll run a quick update on VPS2 to inject VPS1's key.
-        
-        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', placeholderKey);
-        
-        const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
-        
-        // Robust key extraction from stdout
-        const vps2PubMatch = vps2Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-        if (vps2PubMatch) {
-          d_vps2_wg0_pub = vps2PubMatch[1];
-        } else {
-          // Fallback: Try to get it manually if the echo failed
-          addLog("VPS2 setup finished but key echo not found. Attempting manual retrieval...", "info");
-          d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
-        }
-        
-        if (!d_vps2_wg0_pub) {
-          addLog("CRITICAL ERROR: Could not retrieve VPS2 Public Key. Deployment cannot continue.", "error");
-          throw new Error("VPS2 Public Key Retrieval Failed");
-        }
-        
-        if ((vps2Result?.stdout || "").includes("REBOOT_REQUIRED")) {
-          await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
-          const retryResult = await sshExecute(activeTunnel.vps2, vps2Setup);
-          const retryPubMatch = retryResult.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-          if (retryPubMatch) d_vps2_wg0_pub = retryPubMatch[1];
-        }
-      }
-      
-      updateActiveTunnel({ 
-        step: 1,
-        vps2: {
-          ...activeTunnel.vps2,
-          wg0PublicKey: d_vps2_wg0_pub
-        }
-      });
-
-      // --- VPS1 Deployment ---
-      addLog("Checking if VPS1 (Gateway) is already deployed...", "info");
-      const vps1AlreadyDeployed = await isVpsDeployed(activeTunnel.vps1, ['wg0', 'wg1']);
-
-      if (vps1AlreadyDeployed && !isCleanInstall) {
-        checkCancel();
-        addLog("VPS1 (Gateway) is already deployed and active. Fetching existing keys...", "success");
-        d_vps1_wg1_pub = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
-        if (d_vps1_wg1_pub) {
-          addLog(`Existing VPS1 PubKey recovered: ${d_vps1_wg1_pub.substring(0, 10)}...`, "info");
-        }
-        d_vps1_wg0_pub = await getVpsPublicKey(activeTunnel.vps1, 'wg0');
-        if (d_vps1_wg0_pub) {
-          addLog(`Existing VPS1 WG0 PubKey recovered: ${d_vps1_wg0_pub.substring(0, 10)}...`, "info");
-        }
-      } else {
-        checkCancel();
-        if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS1...", "info");
-        addLog("Initiating deployment for VPS1 (Gateway)...", "info");
-        addLog(`Connecting to ${activeTunnel.vps1.ip} via SSH...`, "cmd");
-
-        let vps1Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
-        // Inject VPS2's key into VPS1 Setup
-        vps1Setup = vps1Setup.replaceAll('__VPS2_WG0_PUB_KEY__', d_vps2_wg0_pub);
-        
-        const vps1Result = await sshExecute(activeTunnel.vps1, vps1Setup);
-        
-        // Parse public key from output
-        const vps1PubMatch = vps1Result.stdout.match(/RESULT_WG1_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-        if (vps1PubMatch) {
-          d_vps1_wg1_pub = vps1PubMatch[1];
-          addLog(`VPS1 Public Key captured: ${d_vps1_wg1_pub.substring(0, 10)}...`, "success");
-        }
-        const vps1Wg0PubMatch = vps1Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-        if (vps1Wg0PubMatch) {
-          d_vps1_wg0_pub = vps1Wg0PubMatch[1];
-          addLog(`VPS1 WG0 Public Key captured: ${d_vps1_wg0_pub.substring(0, 10)}...`, "success");
-        }
-
-        if ((vps1Result?.stdout || "").includes("REBOOT_REQUIRED")) {
-          await rebootVpsAndWait(activeTunnel.vps1, "VPS1 (Gateway)");
-          addLog("Retrying VPS1 setup after reboot...", "info");
-          const retryResult = await sshExecute(activeTunnel.vps1, vps1Setup);
-          if (retryResult.code !== 0 && retryResult.code !== undefined) {
-            throw new Error(`VPS1 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
-          }
-          const retryPubMatch = retryResult.stdout.match(/RESULT_WG1_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-          if (retryPubMatch) d_vps1_wg1_pub = retryPubMatch[1];
-        } else if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
-          throw new Error(`VPS1 Setup Failed (Code ${vps1Result.code}): ${vps1Result.errorOutput || vps1Result.stderr}`);
-        }
-        addLog("VPS1 Setup Complete.", "success");
+        addLog("VPS1 already prepared. Skipping preparation phase.", "success", "vps1");
       }
 
-      // --- Final Key Sync ---
+      // 2. Prepare VPS2
+      addLog("Checking if VPS2 (Exit Node) preparation is needed...", "info", "vps2");
+      const vps2AlreadyDeployed = await isVpsDeployed(currentTunnel.vps2, ['wg0']);
+      if (!vps2AlreadyDeployed || isCleanInstall) {
+        checkCancel();
+        addLog("Preparing VPS2 (Exit Node): Installing Docker, WireGuard & Tools...", "info", "vps2");
+        const vps2PrepareRes = await sshExecute(currentTunnel.vps2, `bash -s -- prepare << '_EOF_LODGEGUARD_'\n${vps2SetupRaw}\n_EOF_LODGEGUARD_`);
+        if (vps2PrepareRes.stdout.includes("REBOOT_REQUIRED")) {
+          await rebootVpsAndWait(currentTunnel.vps2, "VPS2 (Exit Node)");
+          addLog("VPS2 rebooted and ready for configuration.", "success", "vps2");
+        } else if (vps2PrepareRes.code !== 0 && vps2PrepareRes.code !== undefined) {
+          throw new Error(`VPS2 Preparation Failed (Code ${vps2PrepareRes.code}): ${vps2PrepareRes.stderr || vps2PrepareRes.errorOutput}`);
+        }
+        addLog("VPS2 Preparation Complete.", "success", "vps2");
+      } else {
+        addLog("VPS2 already prepared. Skipping preparation phase.", "success", "vps2");
+      }
+
+      // --- Key Retrieval Phase ---
+      addLog("Phase 2: Out-of-band Key Exchange (via Public SSH)...", "info");
+      
+      addLog("Retrieving VPS1 Public Key...", "info", "vps1");
+      d_vps1_wg1_pub = await getVpsPublicKey(currentTunnel.vps1, 'wg1');
+      if (!d_vps1_wg1_pub) throw new Error("Failed to retrieve VPS1 Public Key.");
+      addLog(`VPS1 Key: ${d_vps1_wg1_pub.substring(0, 10)}...`, "success", "vps1");
+
+      addLog("Retrieving VPS2 Public Key...", "info", "vps2");
+      d_vps2_wg0_pub = await getVpsPublicKey(currentTunnel.vps2, 'wg0');
+      if (!d_vps2_wg0_pub) throw new Error("Failed to retrieve VPS2 Public Key.");
+      addLog(`VPS2 Key: ${d_vps2_wg0_pub.substring(0, 10)}...`, "success", "vps2");
+
+      // --- Configuration Phase ---
+      addLog("Phase 3: Deterministic Configuration Sequence...", "info");
+
+      // 1. Configure VPS2 (Exit Node) first
       checkCancel();
-      addLog("Ensuring peer keys are synchronized between nodes...", "info");
-      
-      // Recovery: If keys are missing from the capture, try to fetch them explicitly
-      if (!d_vps1_wg1_pub || !d_vps2_wg0_pub) {
-        addLog("One or more public keys are missing from output. Attempting direct recovery...", "info");
-        if (!d_vps1_wg1_pub) d_vps1_wg1_pub = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
-        if (!d_vps2_wg0_pub) d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+      addLog("Configuring VPS2 (Exit Node) with VPS1 Key...", "info", "vps2");
+      const vps2Result = await sshExecute(currentTunnel.vps2, `bash -s -- configure "${d_vps1_wg1_pub}" << '_EOF_LODGEGUARD_'\n${vps2SetupRaw}\n_EOF_LODGEGUARD_`);
+      if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
+        throw new Error(`VPS2 Configuration Failed: ${vps2Result.stderr || vps2Result.errorOutput}`);
+      }
+      addLog("VPS2 Configuration Complete & wg0 interface started.", "success", "vps2");
+
+      // 2. Configure VPS1 (Gateway)
+      checkCancel();
+      addLog("Configuring VPS1 (Gateway) with VPS2 Key...", "info", "vps1");
+      const vps1Result = await sshExecute(currentTunnel.vps1, `bash -s -- configure "${d_vps2_wg0_pub}" << '_EOF_LODGEGUARD_'\n${vps1SetupRaw}\n_EOF_LODGEGUARD_`);
+      if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
+        throw new Error(`VPS1 Configuration Failed: ${vps1Result.stderr || vps1Result.errorOutput}`);
+      }
+      addLog("VPS1 Configuration Complete & wg1 interface started.", "success", "vps1");
+
+      // Extract VPS1 WG0 Key (for clients)
+      const vps1Wg0PubMatch = vps1Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
+      if (vps1Wg0PubMatch) {
+        d_vps1_wg0_pub = vps1Wg0PubMatch[1];
+        addLog(`Client Gateway (WG0) Public Key captured.`, "success", "vps1");
       }
 
-      if (d_vps1_wg1_pub && d_vps2_wg0_pub) {
-        addLog(`Final Key Exchange: Syncing VPS1 Gateway (${d_vps1_wg1_pub.substring(0,8)}...) with VPS2 Exit Node (${d_vps2_wg0_pub.substring(0,8)}...)`, "info");
-        
-        // Update VPS1's peer (VPS2)
-        // We use sed to replace the placeholder or any existing key in the config file
-        const updateVps1Peer = `
-log_step "Retrieving VPS2 public key for final synchronization..."
-echo "Recording VPS2 public key (${d_vps2_wg0_pub}) into VPS1's wg1.conf..."
-sed -i 's|PublicKey = .*|PublicKey = ${d_vps2_wg0_pub}|' /etc/wireguard/wg1.conf
-log_step "Restarting wg1 to apply the exchanged keys..."
-systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
-wg show wg1
-`;
-        await sshExecute(activeTunnel.vps1, updateVps1Peer);
-        
-        // Update VPS2's peer (VPS1)
-        const updateVps2Peer = `
-log_step "Retrieving VPS1 public key for final synchronization..."
-echo "Recording VPS1 public key (${d_vps1_wg1_pub}) into VPS2's wg0.conf..."
-sed -i 's|PublicKey = .*|PublicKey = ${d_vps1_wg1_pub}|' /etc/wireguard/wg0.conf
-log_step "Restarting wg0 to apply the exchanged keys..."
-systemctl restart wg-quick@wg0 || wg-quick up wg0 || true
-wg show wg0
-`;
-        await sshExecute(activeTunnel.vps2, updateVps2Peer);
-        addLog("Peer keys successfully retrieved, exchanged, and recorded on both servers.", "success");
-      } else {
-        addLog("CRITICAL ERROR: Could not synchronize peer keys. One or both keys are still missing.", "error");
-        addLog(`Captured VPS1 Key: ${d_vps1_wg1_pub || 'MISSING'}`, "error");
-        addLog(`Captured VPS2 Key: ${d_vps2_wg0_pub || 'MISSING'}`, "error");
-      }
-      
+      currentTunnel.vps1.wg0PublicKey = d_vps1_wg0_pub;
+      currentTunnel.vps1.wg1PublicKey = d_vps1_wg1_pub;
+      currentTunnel.vps2.wg0PublicKey = d_vps2_wg0_pub;
+
       updateActiveTunnel({ 
         step: 2, 
         status: 'deployed',
-        vps1: {
-          ...activeTunnel.vps1,
-          wg0PublicKey: d_vps1_wg0_pub,
-          wg1PublicKey: d_vps1_wg1_pub
-        },
-        vps2: {
-          ...activeTunnel.vps2,
-          wg0PublicKey: d_vps2_wg0_pub
-        }
+        vps1: { ...currentTunnel.vps1 },
+        vps2: { ...currentTunnel.vps2 }
       });
 
       addLog("Final system verification...", "info");
       
-      addLog("Verifying VPS1 tunnel interface (wg1)...", "cmd");
-      const wg1Check = await sshExecute(activeTunnel.vps1, "wg show wg1");
+      addLog("Verifying VPS1 tunnel interface (wg1)...", "cmd", "vps1");
+      const wg1Check = await sshExecute(currentTunnel.vps1, "wg show wg1");
       if (wg1Check.code === 0) {
-        addLog("VPS1 wg1 interface is UP.", "success");
+        addLog("VPS1 wg1 interface is UP.", "success", "vps1");
       } else {
-        addLog("VPS1 wg1 interface is DOWN or not configured.", "error");
+        addLog("VPS1 wg1 interface is DOWN or not configured.", "error", "vps1");
       }
 
-      addLog("Testing connectivity between VPS1 and VPS2 (10.9.0.1 <-> 10.9.0.254)...", "cmd");
-      const pingCheck = await sshExecute(activeTunnel.vps1, "ping -c 3 10.9.0.254");
+      addLog("Testing connectivity between VPS1 and VPS2 (10.9.0.1 <-> 10.9.0.254)...", "cmd", "vps1");
+      const pingCheck = await sshExecute(currentTunnel.vps1, "ping -c 3 10.9.0.254");
       if (pingCheck.code === 0) {
-        addLog("Tunnel connectivity verified!", "success");
+        addLog("Tunnel connectivity verified!", "success", "vps1");
       } else {
-        addLog("CRITICAL ERROR: Tunnel connectivity failed. VPS2 is not reachable via 10.9.0.254", "error");
+        addLog("CRITICAL ERROR: Tunnel connectivity failed. VPS2 is not reachable via 10.9.0.254", "error", "vps1");
         addLog("Aborting post-deployment sync to prevent system hang.", "error");
         setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, status: 'failed' } : t));
         return;
       }
 
-      addLog("Verifying IP forwarding...", "cmd");
-      const ipForwardCheck = await sshExecute(activeTunnel.vps1, "cat /proc/sys/net/ipv4/ip_forward");
+      addLog("Verifying IP forwarding...", "cmd", "vps1");
+      const ipForwardCheck = await sshExecute(currentTunnel.vps1, "cat /proc/sys/net/ipv4/ip_forward");
       if ((ipForwardCheck.stdout || "").trim() === '1') {
-        addLog("IP Forwarding is ENABLED.", "success");
+        addLog("IP Forwarding is ENABLED.", "success", "vps1");
       } else {
-        addLog("IP Forwarding is DISABLED.", "error");
+        addLog("IP Forwarding is DISABLED.", "error", "vps1");
       }
 
       addLog("Double VPN Deployment Successful!", "success");
@@ -2415,36 +1976,36 @@ wg show wg0
         fi
         cat /root/.ssh/id_rsa.pub
       `;
-      const vps1PubKeyRes = await sshExecute(activeTunnel.vps1, sshSetupCmd);
+      const vps1PubKeyRes = await sshExecute(currentTunnel.vps1, sshSetupCmd);
       // Extract only the key part (starts with ssh-rsa or similar)
       const vps1PubKeyMatch = vps1PubKeyRes.stdout.match(/(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ssh-dss) [A-Za-z0-9+/=]+( .*)?/);
       const vps1PubKey = vps1PubKeyMatch ? vps1PubKeyMatch[0].trim() : "";
       
       if (vps1PubKey) {
-        addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd");
-        await sshExecute(activeTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
+        addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd", "vps2");
+        await sshExecute(currentTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
         
         // Verify SSH access from VPS1 to VPS2
-        addLog("Verifying SSH access from VPS1 to VPS2...", "cmd");
+        addLog("Verifying SSH access from VPS1 to VPS2...", "cmd", "vps1");
         const sshVerifyCmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo 'SSH_OK'"`;
-        const sshVerifyRes = await sshExecute(activeTunnel.vps1, sshVerifyCmd);
+        const sshVerifyRes = await sshExecute(currentTunnel.vps1, sshVerifyCmd);
         if (sshVerifyRes.stdout.includes("SSH_OK")) {
-          addLog("SSH access from VPS1 to VPS2 verified!", "success");
+          addLog("SSH access from VPS1 to VPS2 verified!", "success", "vps1");
         } else {
-          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed. Key rotation will not work.", "error");
-          addLog(`Error: ${sshVerifyRes.stderr || sshVerifyRes.errorOutput}`, "error");
+          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed. Key rotation will not work.", "error", "vps1");
+          addLog(`Error: ${sshVerifyRes.stderr || sshVerifyRes.errorOutput}`, "error", "vps1");
         }
       } else {
-        addLog("CRITICAL ERROR: Could not retrieve VPS1 SSH public key.", "error");
+        addLog("CRITICAL ERROR: Could not retrieve VPS1 SSH public key.", "error", "vps1");
       }
       
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
-      addLog("Running lodgeguard-sync.sh on VPS1...", "cmd");
-      const syncRes = await sshExecute(activeTunnel.vps1, syncScript);
+      addLog("Running lodgeguard-sync.sh on VPS1...", "cmd", "vps1");
+      const syncRes = await sshExecute(currentTunnel.vps1, syncScript);
       if (syncRes.code === 0 || syncRes.code === undefined) {
-        addLog("All VPS WireGuard keys have been updated and synchronized.", "success");
+        addLog("All VPS WireGuard keys have been updated and synchronized.", "success", "vps1");
       } else {
-        addLog(`Key synchronization failed: ${syncRes.stderr || syncRes.errorOutput}`, "error");
+        addLog(`Key synchronization failed: ${syncRes.stderr || syncRes.errorOutput}`, "error", "vps1");
       }
 
     } catch (error: any) {
@@ -2456,12 +2017,12 @@ wg show wg0
       const vps2Rollback = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.rollbackContent || '';
       
       if (vps1Rollback) {
-        addLog("Cleaning up VPS1...", "cmd");
-        await sshExecute(activeTunnel.vps1, vps1Rollback).catch(e => console.error("VPS1 Rollback failed", e));
+        addLog("Cleaning up VPS1...", "cmd", "vps1");
+        await sshExecute(currentTunnel.vps1, vps1Rollback).catch(e => console.error("VPS1 Rollback failed", e));
       }
       if (vps2Rollback) {
-        addLog("Cleaning up VPS2...", "cmd");
-        await sshExecute(activeTunnel.vps2, vps2Rollback).catch(e => console.error("VPS2 Rollback failed", e));
+        addLog("Cleaning up VPS2...", "cmd", "vps2");
+        await sshExecute(currentTunnel.vps2, vps2Rollback).catch(e => console.error("VPS2 Rollback failed", e));
       }
       
       addLog("Rollback Complete. System is stable.", "success");
@@ -2473,6 +2034,9 @@ wg show wg0
     setIsTestingConfig(true);
     addLog("--- Starting VPS Readiness Check ---", "info");
 
+    // Use a local object to track state
+    let currentTunnel = { ...activeTunnel };
+
     try {
       // Find the vps-check script
       const checkScript = INITIAL_SCRIPTS.find(s => s.id === 'vps-check');
@@ -2483,25 +2047,38 @@ wg show wg0
       }
 
       // Test VPS1
-      addLog(`Testing VPS1 Gateway (${activeTunnel.vps1.ip})...`, "info");
-      const res1 = await sshExecute(activeTunnel.vps1, checkScript.content);
+      addLog(`Testing VPS1 Gateway (${currentTunnel.vps1.ip})...`, "info", "vps1");
+      let vps1CheckScript = checkScript.content.replaceAll('__VPS1_IP__', currentTunnel.vps1.ip)
+                                               .replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
+                                               .replaceAll('__WG_EASY_PORT__', (currentTunnel.vps1.ports?.['WG_EASY_PORT'] || 51820).toString())
+                                               .replaceAll('__WG_EASY_UI_PORT__', (currentTunnel.vps1.ports?.['WG_EASY_UI_PORT'] || 51821).toString())
+                                               .replaceAll('__WG_INTER_VPS_PORT__', (currentTunnel.vps1.ports?.['WG_INTER_VPS_PORT'] || 51822).toString())
+                                               .replaceAll('__WG_EXIT_PORT__', (currentTunnel.vps2.ports?.['WG_EXIT_PORT'] || 51820).toString());
+
+      const res1 = await sshExecute(currentTunnel.vps1, vps1CheckScript);
       if (res1.code === 0 || res1.code === undefined) {
-        addLog("VPS1 Readiness Check Passed!", "success");
-        if (res1.stdout) addLog(res1.stdout, "info");
+        addLog("VPS1 Readiness Check Passed!", "success", "vps1");
+        if (res1.stdout) addLog(res1.stdout, "info", "vps1");
       } else {
-        addLog(`VPS1 Readiness Check Failed: ${res1.errorOutput || res1.stderr}`, "error");
-        if (res1.stdout) addLog(res1.stdout, "info");
+        addLog(`VPS1 Readiness Check Failed: ${res1.errorOutput || res1.stderr}`, "error", "vps1");
+        if (res1.stdout) addLog(res1.stdout, "info", "vps1");
       }
 
       // Test VPS2
-      addLog(`Testing VPS2 Exit Node (${activeTunnel.vps2.ip})...`, "info");
-      const res2 = await sshExecute(activeTunnel.vps2, checkScript.content);
+      addLog(`Testing VPS2 Exit Node (${currentTunnel.vps2.ip})...`, "info", "vps2");
+      let vps2CheckScript = checkScript.content.replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
+                                               .replaceAll('__WG_EXIT_PORT__', (currentTunnel.vps2.ports?.['WG_EXIT_PORT'] || 51820).toString())
+                                               .replaceAll('__WG_EASY_PORT__', '51820')
+                                               .replaceAll('__WG_EASY_UI_PORT__', '51821')
+                                               .replaceAll('__WG_INTER_VPS_PORT__', '51822');
+
+      const res2 = await sshExecute(currentTunnel.vps2, vps2CheckScript);
       if (res2.code === 0 || res2.code === undefined) {
-        addLog("VPS2 Readiness Check Passed!", "success");
-        if (res2.stdout) addLog(res2.stdout, "info");
+        addLog("VPS2 Readiness Check Passed!", "success", "vps2");
+        if (res2.stdout) addLog(res2.stdout, "info", "vps2");
       } else {
-        addLog(`VPS2 Readiness Check Failed: ${res2.errorOutput || res2.stderr}`, "error");
-        if (res2.stdout) addLog(res2.stdout, "info");
+        addLog(`VPS2 Readiness Check Failed: ${res2.errorOutput || res2.stderr}`, "error", "vps2");
+        if (res2.stdout) addLog(res2.stdout, "info", "vps2");
       }
 
       addLog("--- VPS Readiness Check Complete ---", "info");
@@ -3001,15 +2578,15 @@ PersistentKeepalive = 25`;
                           <button 
                             onClick={async () => {
                               try {
-                                addLog("Testing connection to VPS1...", "info");
+                                addLog("Testing connection to VPS1...", "info", "vps1");
                                 const res = await sshExecute(activeTunnel.vps1, "echo 'Connection OK'");
                                 if (res.code === 0) {
-                                  addLog("VPS1 Connection Successful!", "success");
+                                  addLog("VPS1 Connection Successful!", "success", "vps1");
                                 } else {
-                                  addLog(`VPS1 Connection Failed: ${res.stderr}`, "error");
+                                  addLog(`VPS1 Connection Failed: ${res.stderr}`, "error", "vps1");
                                 }
                               } catch (err: any) {
-                                addLog(`VPS1 Connection Error: ${err.message}`, "error");
+                                addLog(`VPS1 Connection Error: ${err.message}`, "error", "vps1");
                               }
                             }}
                             className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-widest"
@@ -3050,15 +2627,15 @@ PersistentKeepalive = 25`;
                           <button 
                             onClick={async () => {
                               try {
-                                addLog("Testing connection to VPS2...", "info");
+                                addLog("Testing connection to VPS2...", "info", "vps2");
                                 const res = await sshExecute(activeTunnel.vps2, "echo 'Connection OK'");
                                 if (res.code === 0) {
-                                  addLog("VPS2 Connection Successful!", "success");
+                                  addLog("VPS2 Connection Successful!", "success", "vps2");
                                 } else {
-                                  addLog(`VPS2 Connection Failed: ${res.stderr}`, "error");
+                                  addLog(`VPS2 Connection Failed: ${res.stderr}`, "error", "vps2");
                                 }
                               } catch (err: any) {
-                                addLog(`VPS2 Connection Error: ${err.message}`, "error");
+                                addLog(`VPS2 Connection Error: ${err.message}`, "error", "vps2");
                               }
                             }}
                             className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-widest"
@@ -4163,18 +3740,18 @@ PersistentKeepalive = 25`;
                               onClick={async () => {
                                 try {
                                   updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'testing' } });
-                                  addLog(`Testing connection to VPS1 (${activeTunnel.vps1.ip})...`, "info");
+                                  addLog(`Testing connection to VPS1 (${activeTunnel.vps1.ip})...`, "info", "vps1");
                                   const res = await sshExecute(activeTunnel.vps1, "echo 'Connection Successful'");
                                   if (res.code === 0) {
                                     updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'success' } });
-                                    addLog("VPS1 Connection Successful!", "success");
+                                    addLog("VPS1 Connection Successful!", "success", "vps1");
                                   } else {
                                     updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
-                                    addLog(`VPS1 Connection Failed: ${res.errorOutput}`, "error");
+                                    addLog(`VPS1 Connection Failed: ${res.errorOutput}`, "error", "vps1");
                                   }
                                 } catch (err: any) {
                                   updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
-                                  addLog(`VPS1 Connection Error: ${err.message}`, "error");
+                                  addLog(`VPS1 Connection Error: ${err.message}`, "error", "vps1");
                                 }
                               }}
                               className={cn(
@@ -4248,18 +3825,18 @@ PersistentKeepalive = 25`;
                               onClick={async () => {
                                 try {
                                   updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'testing' } });
-                                  addLog(`Testing connection to VPS2 (${activeTunnel.vps2.ip})...`, "info");
+                                  addLog(`Testing connection to VPS2 (${activeTunnel.vps2.ip})...`, "info", "vps2");
                                   const res = await sshExecute(activeTunnel.vps2, "echo 'Connection Successful'");
                                   if (res.code === 0) {
                                     updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'success' } });
-                                    addLog("VPS2 Connection Successful!", "success");
+                                    addLog("VPS2 Connection Successful!", "success", "vps2");
                                   } else {
                                     updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
-                                    addLog(`VPS2 Connection Failed: ${res.errorOutput}`, "error");
+                                    addLog(`VPS2 Connection Failed: ${res.errorOutput}`, "error", "vps2");
                                   }
                                 } catch (err: any) {
                                   updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
-                                  addLog(`VPS2 Connection Error: ${err.message}`, "error");
+                                  addLog(`VPS2 Connection Error: ${err.message}`, "error", "vps2");
                                 }
                               }}
                               className={cn(
@@ -4459,37 +4036,75 @@ PersistentKeepalive = 25`;
 
                   <div className="space-y-6">
                     <Card title="Deployment Logs" icon={Terminal} className="h-full">
-                      <div className="flex flex-col h-full">
+                      <div className="flex flex-col h-full space-y-4">
                         <div className="flex justify-end mb-2">
                           <button 
                             onClick={() => updateActiveTunnel({ logs: [] })}
                             className="text-[10px] font-bold text-zinc-500 hover:text-zinc-300 uppercase tracking-widest flex items-center gap-1"
                           >
                             <Trash2 className="w-3 h-3" />
-                            Clear Logs
+                            Clear All Logs
                           </button>
                         </div>
-                        <div className="bg-zinc-950 rounded-xl border border-zinc-800 p-4 h-[500px] overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-thin scrollbar-thumb-zinc-800">
-                        {activeTunnel.logs.length === 0 && (
-                          <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2">
-                            <Database className="w-8 h-8 opacity-20" />
-                            <p>Waiting for deployment to start...</p>
+                        
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 h-full">
+                          {/* VPS1 Logs */}
+                          <div className="flex flex-col space-y-2">
+                            <div className="flex items-center gap-2 px-1">
+                              <Server className="w-3 h-3 text-emerald-500" />
+                              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">VPS1 Gateway Logs</span>
+                            </div>
+                            <div className="bg-zinc-950 rounded-xl border border-zinc-800 p-4 h-[400px] overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-thin scrollbar-thumb-zinc-800">
+                              {activeTunnel.logs.filter(l => l.vps === 'vps1').length === 0 && (
+                                <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2">
+                                  <p>Waiting for VPS1 activity...</p>
+                                </div>
+                              )}
+                              {activeTunnel.logs.filter(l => l.vps === 'vps1').map((log, i) => (
+                                <div key={i} className={cn(
+                                  "flex gap-3",
+                                  log.type === 'error' ? "text-red-400" : 
+                                  log.type === 'success' ? "text-emerald-400" : 
+                                  log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
+                                )}>
+                                  <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
+                                  <span className="break-all">
+                                    {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
+                                    {log.msg}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        )}
-                        {activeTunnel.logs.map((log, i) => (
-                          <div key={i} className={cn(
-                            "flex gap-3",
-                            log.type === 'error' ? "text-red-400" : 
-                            log.type === 'success' ? "text-emerald-400" : 
-                            log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
-                          )}>
-                            <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
-                            <span className="break-all">
-                              {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
-                              {log.msg}
-                            </span>
+
+                          {/* VPS2 Logs */}
+                          <div className="flex flex-col space-y-2">
+                            <div className="flex items-center gap-2 px-1">
+                              <Server className="w-3 h-3 text-zinc-500" />
+                              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">VPS2 Exit Node Logs</span>
+                            </div>
+                            <div className="bg-zinc-950 rounded-xl border border-zinc-800 p-4 h-[400px] overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-thin scrollbar-thumb-zinc-800">
+                              {activeTunnel.logs.filter(l => l.vps === 'vps2').length === 0 && (
+                                <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2">
+                                  <p>Waiting for VPS2 activity...</p>
+                                </div>
+                              )}
+                              {activeTunnel.logs.filter(l => l.vps === 'vps2').map((log, i) => (
+                                <div key={i} className={cn(
+                                  "flex gap-3",
+                                  log.type === 'error' ? "text-red-400" : 
+                                  log.type === 'success' ? "text-emerald-400" : 
+                                  log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
+                                )}>
+                                  <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
+                                  <span className="break-all">
+                                    {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
+                                    {log.msg}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
                           </div>
-                        ))}
                         </div>
                       </div>
                     </Card>
