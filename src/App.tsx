@@ -461,61 +461,69 @@ export default function App() {
       description: 'This script handles the automatic key rotation and exchange between VPS1 and VPS2. It is typically run via a daily cron job.',
       icon: Lock,
       content: `#!/bin/bash
-# LodgeGuard Automatic Key Rotation & Exchange Script
-# This script runs on VPS1 (Gateway) and communicates with VPS2 (Node)
-set -ex
+# LodgeGuard Safe Key Rotation Script
+set -e
 
-# Target IP for key exchange (defaults to internal tunnel IP)
 PEER_IP="\${1:-10.9.0.254}"
+LOG_FILE="/root/DTLogs/lodgeguard-sync.txt"
+mkdir -p /root/DTLogs
 
-# 1. Ensure SSH Key exists for communication
-if [ ! -f /root/.ssh/id_rsa ]; then
-    echo "Generating SSH key for VPS1 -> VPS2 communication..."
-    ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
+log_msg() {
+    echo "[\$(date)] \$1" | tee -a "\$LOG_FILE"
+}
+
+log_msg "Starting safe key rotation with peer \$PEER_IP..."
+
+# 1. Verify tunnel is currently up
+if ! ping -c 1 -W 5 "\$PEER_IP" > /dev/null; then
+    log_msg "ERROR: Tunnel to \$PEER_IP is currently down. Cannot perform safe rotation."
+    exit 1
 fi
 
-# 2. Generate New Ephemeral Keys
-echo "Generating new ephemeral WireGuard keys for rotation..."
+# 2. Generate new keys
 NEW_PRIV=\$(wg genkey)
 NEW_PUB=\$(echo "\$NEW_PRIV" | wg pubkey)
+OLD_PRIV=\$(cat /etc/wireguard/wg1.key)
+OLD_PUB=\$(cat /etc/wireguard/wg1.pub)
 
-# 3. Exchange Keys with VPS2
-echo "Exchanging keys: Sending new VPS1 public key to VPS2 via \$PEER_IP..."
+log_msg "Generated new ephemeral keys. Pushing new public key to peer..."
 
-# Check if VPS2 is reachable
-if ! ping -c 1 -W 5 "\$PEER_IP" > /dev/null; then
-    echo "ERROR: VPS2 (\$PEER_IP) is not reachable. Aborting key exchange."
+# 3. Add new public key to peer's allowed list (temporarily allowing both keys)
+if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg0 peer \$NEW_PUB allowed-ips 10.9.0.0/24,10.8.0.0/24"; then
+    log_msg "ERROR: Failed to add new key to peer. Aborting rotation."
     exit 1
 fi
 
-# Push the new public key to VPS2
-if ! ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@"\$PEER_IP" "echo '\$NEW_PUB' > /etc/wireguard/vps1_new_pub"; then
-    echo "ERROR: Failed to send public key to VPS2 via SSH. Check if SSH keys are authorized."
+# 4. Apply new private key locally
+log_msg "Applying new private key locally..."
+wg set wg1 private-key <(echo "\$NEW_PRIV")
+
+# 5. Verify connectivity with new keys
+log_msg "Testing tunnel connectivity with new keys..."
+if ping -c 3 -W 5 "\$PEER_IP" > /dev/null; then
+    log_msg "Connectivity verified! Committing changes..."
+    
+    # Save locally
+    echo "\$NEW_PRIV" > /etc/wireguard/wg1.key
+    echo "\$NEW_PUB" > /etc/wireguard/wg1.pub
+    sed -i "s|PrivateKey = .*|PrivateKey = \$NEW_PRIV|" /etc/wireguard/wg1.conf
+    
+    # Remove old key from peer and save peer config
+    ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg0 peer \$OLD_PUB remove && wg-quick save wg0"
+    
+    log_msg "Key rotation completed successfully."
+else
+    log_msg "ERROR: Connectivity failed with new keys. Initiating rollback..."
+    
+    # Rollback local
+    wg set wg1 private-key <(echo "\$OLD_PRIV")
+    
+    # Rollback peer
+    ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg0 peer \$NEW_PUB remove"
+    
+    log_msg "Rollback complete. Old keys are still active."
     exit 1
 fi
-
-# 4. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
-echo "Recording new private key into /etc/wireguard/wg1.conf..."
-sed -i "s|PrivateKey = .*|PrivateKey = \$NEW_PRIV|" /etc/wireguard/wg1.conf
-
-# 5. Reload WireGuard
-echo "Restarting wg-quick@wg1 to apply new keys..."
-if ! systemctl restart wg-quick@wg1; then
-    echo "ERROR: Failed to restart wg-quick@wg1. Check system logs."
-    exit 1
-fi
-
-# 6. Verify Interface is Up
-if ! wg show wg1 > /dev/null; then
-    echo "ERROR: wg1 interface is not active after restart."
-    exit 1
-fi
-
-echo "Key rotation and exchange successful!"
-
-# 7. Log Rotation
-mkdir -p /root/DTLogs
-echo "Key rotation completed at \$(date) via \$PEER_IP" >> /root/DTLogs/lodgeguard-sync.txt
 `
     },
     {
@@ -582,7 +590,8 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
   log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg1)..."
   mkdir -p /etc/wireguard
   if [ ! -f /etc/wireguard/wg1.key ]; then
-    wg genkey | tee /etc/wireguard/wg1.key | wg pubkey > /etc/wireguard/wg1.pub
+    wg genkey > /etc/wireguard/wg1.key
+    wg pubkey < /etc/wireguard/wg1.key > /etc/wireguard/wg1.pub
   fi
   echo "RESULT_WG1_PUB_KEY: $(cat /etc/wireguard/wg1.pub)"
   
@@ -597,8 +606,12 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
 do_configure() {
   PEER_PUB="$1"
   if [ -z "$PEER_PUB" ]; then
-    log_step "configure" "ERROR: No peer public key provided for wg1."
-    exit 1
+    if [ -f /etc/wireguard/peer_wg0.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg0.pub)
+    else
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg0.pub."
+      exit 1
+    fi
   fi
 
   log_step "configure" "--- Starting VPS1 Configuration Phase ---"
@@ -779,7 +792,8 @@ do_prepare() {
   log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
   mkdir -p /etc/wireguard
   if [ ! -f /etc/wireguard/wg0.key ]; then
-    wg genkey | tee /etc/wireguard/wg0.key | wg pubkey > /etc/wireguard/wg0.pub
+    wg genkey > /etc/wireguard/wg0.key
+    wg pubkey < /etc/wireguard/wg0.key > /etc/wireguard/wg0.pub
   fi
   echo "RESULT_WG0_PUB_KEY: $(cat /etc/wireguard/wg0.pub)"
   
@@ -794,8 +808,12 @@ do_prepare() {
 do_configure() {
   PEER_PUB="$1"
   if [ -z "$PEER_PUB" ]; then
-    log_step "configure" "ERROR: No peer public key provided for wg0."
-    exit 1
+    if [ -f /etc/wireguard/peer_wg1.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg1.pub)
+    else
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg1.pub."
+      exit 1
+    fi
   fi
 
   log_step "configure" "--- Starting VPS2 Configuration Phase ---"
@@ -1728,13 +1746,7 @@ ClientNames=${preSetupConfig.clientNames}
         return res.stdout.trim();
       }
       
-      // 3. Fallback: Try peer file (if pushed directly)
-      res = await sshExecute(vps, `cat /etc/wireguard/peer_${iface}.pub`);
-      if (res.code === 0 && res.stdout.trim()) {
-        return res.stdout.trim();
-      }
-      
-      // 4. Fallback: Try docker if it's wg0 (wg-easy)
+      // 3. Fallback: Try docker if it's wg0 (wg-easy)
       if (iface === 'wg0') {
         res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
         if (res.code === 0 && res.stdout.trim()) {
@@ -2128,14 +2140,14 @@ ClientNames=${preSetupConfig.clientNames}
         addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd", "exchange");
         await sshExecute(currentTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
         
-        // Verify SSH access from VPS1 to VPS2
-        addLog("Verifying SSH access from VPS1 to VPS2 via Public IP...", "cmd", "exchange");
-        const sshVerifyCmd = `ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip} "echo 'SSH_OK'"`;
+        // Verify SSH access from VPS1 to VPS2 via Tunnel IP
+        addLog("Verifying SSH access from VPS1 to VPS2 via Tunnel IP (10.9.0.254)...", "cmd", "exchange");
+        const sshVerifyCmd = `ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo 'SSH_OK'"`;
         const sshVerifyRes = await sshExecute(currentTunnel.vps1, sshVerifyCmd);
         if (sshVerifyRes.stdout.includes("SSH_OK")) {
-          addLog("SSH access from VPS1 to VPS2 verified!", "success", "exchange");
+          addLog("SSH access from VPS1 to VPS2 verified via secure tunnel!", "success", "exchange");
         } else {
-          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed. Key rotation will not work.", "error", "exchange");
+          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed via tunnel. Key rotation will not work.", "error", "exchange");
           addLog(`Error: ${sshVerifyRes.stderr || sshVerifyRes.errorOutput}`, "error", "exchange");
         }
       } else {
@@ -2143,8 +2155,8 @@ ClientNames=${preSetupConfig.clientNames}
       }
       
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
-      addLog(`Running lodgeguard-sync.sh on VPS1 targeting VPS2 Public IP (${currentTunnel.vps2.ip})...`, "cmd", "exchange");
-      const syncRes = await sshExecute(currentTunnel.vps1, `bash -s -- "${currentTunnel.vps2.ip}" << '_EOF_LODGEGUARD_'\n${syncScript}\n_EOF_LODGEGUARD_`);
+      addLog(`Running lodgeguard-sync.sh on VPS1 targeting VPS2 Tunnel IP (10.9.0.254)...`, "cmd", "exchange");
+      const syncRes = await sshExecute(currentTunnel.vps1, `bash -s -- "10.9.0.254" << '_EOF_LODGEGUARD_'\n${syncScript}\n_EOF_LODGEGUARD_`);
       if (syncRes.code === 0 || syncRes.code === undefined) {
         addLog("All VPS WireGuard keys have been updated and synchronized.", "success", "exchange");
       } else {
