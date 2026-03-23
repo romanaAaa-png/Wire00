@@ -589,7 +589,7 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
 
   log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg1)..."
   mkdir -p /etc/wireguard
-  if [ ! -f /etc/wireguard/wg1.key ]; then
+  if [ ! -s /etc/wireguard/wg1.key ] || [ ! -s /etc/wireguard/wg1.pub ]; then
     wg genkey > /etc/wireguard/wg1.key
     wg pubkey < /etc/wireguard/wg1.key > /etc/wireguard/wg1.pub
   fi
@@ -726,6 +726,10 @@ do_push_key() {
     exit 1
   fi
   PUB_KEY=$(cat /etc/wireguard/\${IFACE}.pub)
+  if [ -z "\$PUB_KEY" ]; then
+    log_step "push-key" "ERROR: Public key for \$IFACE is empty or missing."
+    exit 1
+  fi
   log_step "push-key" "Pushing \$IFACE public key to \$PEER_IP..."
   sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"
 }
@@ -791,7 +795,7 @@ do_prepare() {
 
   log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
   mkdir -p /etc/wireguard
-  if [ ! -f /etc/wireguard/wg0.key ]; then
+  if [ ! -s /etc/wireguard/wg0.key ] || [ ! -s /etc/wireguard/wg0.pub ]; then
     wg genkey > /etc/wireguard/wg0.key
     wg pubkey < /etc/wireguard/wg0.key > /etc/wireguard/wg0.pub
   fi
@@ -863,6 +867,10 @@ do_push_key() {
     exit 1
   fi
   PUB_KEY=$(cat /etc/wireguard/\${IFACE}.pub)
+  if [ -z "\$PUB_KEY" ]; then
+    log_step "push-key" "ERROR: Public key for \$IFACE is empty or missing."
+    exit 1
+  fi
   log_step "push-key" "Pushing \$IFACE public key to \$PEER_IP..."
   sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"
 }
