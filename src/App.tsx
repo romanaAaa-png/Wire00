@@ -697,10 +697,22 @@ if [ -f /var/run/reboot-required ]; then
   echo "REBOOT_REQUIRED"
 fi
 # 2. Setup WG-Easy (Client Gateway)
-log_step "Configuring WG-Easy in /etc/docker/containers/wg-easy..."
-mkdir -p /etc/docker/containers/wg-easy
+# Stop and remove previous versions
+log_step "Cleaning up previous installations..."
+systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
+systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
+ip link delete wg0 2>/dev/null || true
+ip link delete wg1 2>/dev/null || true
+if command -v docker &> /dev/null; then
+  docker stop wg-easy || true
+  docker rm wg-easy || true
+fi
+rm -rf /etc/wireguard /opt/wg-easy /etc/docker/containers/wg-easy || true
 
-cat <<'EOF' > /etc/docker/containers/wg-easy/docker-compose.yml
+log_step "Configuring WG-Easy in /opt/wg-easy..."
+mkdir -p /opt/wg-easy
+
+cat <<'EOF' > /opt/wg-easy/docker-compose.yml
 services:
   wg-easy:
     environment:
@@ -725,19 +737,7 @@ services:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
 EOF
-cd /etc/docker/containers/wg-easy && docker compose up -d || true
-
-# Stop and remove previous versions
-log_step "Cleaning up previous installations..."
-systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
-systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
-ip link delete wg0 2>/dev/null || true
-ip link delete wg1 2>/dev/null || true
-if command -v docker &> /dev/null; then
-  docker stop wg-easy || true
-  docker rm wg-easy || true
-fi
-rm -rf /etc/wireguard /opt/wg-easy || true
+cd /opt/wg-easy && docker compose up -d
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
@@ -749,8 +749,11 @@ sysctl -p || true
 log_step "Verifying WG-Easy container status..."
 sleep 5
 if ! docker ps | grep -q wg-easy; then
-  log_step "ERROR: wg-easy container failed to start."
-  docker logs wg-easy || true
+  log_step "ERROR: wg-easy container is NOT running."
+  log_step "--- Container Status (All) ---"
+  docker ps -a | grep wg-easy || true
+  log_step "--- WG-Easy Logs ---"
+  cd /opt/wg-easy && docker compose logs || docker logs wg-easy || true
   exit 1
 fi
 
