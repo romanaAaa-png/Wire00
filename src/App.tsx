@@ -725,13 +725,22 @@ do_push_key() {
     log_step "push-key" "ERROR: Peer IP or Password missing."
     exit 1
   fi
+  if [ ! -s /etc/wireguard/\${IFACE}.key ] || [ ! -s /etc/wireguard/\${IFACE}.pub ]; then
+    log_step "push-key" "Keys missing or empty. Regenerating..."
+    wg genkey > /etc/wireguard/\${IFACE}.key
+    wg pubkey < /etc/wireguard/\${IFACE}.key > /etc/wireguard/\${IFACE}.pub
+  fi
   PUB_KEY=$(cat /etc/wireguard/\${IFACE}.pub)
   if [ -z "\$PUB_KEY" ]; then
     log_step "push-key" "ERROR: Public key for \$IFACE is empty or missing."
     exit 1
   fi
   log_step "push-key" "Pushing \$IFACE public key to \$PEER_IP..."
-  sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"
+  if ! sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"; then
+    log_step "push-key" "ERROR: Failed to push key via SSH."
+    exit 1
+  fi
+  log_step "push-key" "Successfully pushed key."
 }
 
 case "$1" in
@@ -866,13 +875,22 @@ do_push_key() {
     log_step "push-key" "ERROR: Peer IP or Password missing."
     exit 1
   fi
+  if [ ! -s /etc/wireguard/\${IFACE}.key ] || [ ! -s /etc/wireguard/\${IFACE}.pub ]; then
+    log_step "push-key" "Keys missing or empty. Regenerating..."
+    wg genkey > /etc/wireguard/\${IFACE}.key
+    wg pubkey < /etc/wireguard/\${IFACE}.key > /etc/wireguard/\${IFACE}.pub
+  fi
   PUB_KEY=$(cat /etc/wireguard/\${IFACE}.pub)
   if [ -z "\$PUB_KEY" ]; then
     log_step "push-key" "ERROR: Public key for \$IFACE is empty or missing."
     exit 1
   fi
   log_step "push-key" "Pushing \$IFACE public key to \$PEER_IP..."
-  sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"
+  if ! sshpass -p "\$PEER_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@\$PEER_IP "mkdir -p /etc/wireguard && echo '\$PUB_KEY' > /etc/wireguard/peer_\${IFACE}.pub"; then
+    log_step "push-key" "ERROR: Failed to push key via SSH."
+    exit 1
+  fi
+  log_step "push-key" "Successfully pushed key."
 }
 
 case "$1" in
@@ -1738,28 +1756,30 @@ ClientNames=${preSetupConfig.clientNames}
   };
 
   const getVpsPublicKey = async (vps: VPSConfig, iface: string) => {
+    const extractKey = (text: string) => {
+      const match = text.match(/[A-Za-z0-9+/]{43}=/);
+      return match ? match[0] : "";
+    };
+
     try {
       // 1. Try reading the .pub file (most reliable before interface is up)
       let res = await sshExecute(vps, `cat /etc/wireguard/${iface}.pub`);
-      if (res.code === 0 && res.stdout.trim()) {
-        return res.stdout.trim();
-      }
+      let key = extractKey(res.stdout);
+      if (res.code === 0 && key) return key;
       
       const errorMsg = res.stderr || res.errorOutput || "File not found";
       console.warn(`Method 1 (cat) failed for ${iface} on ${vps.ip}: ${errorMsg}`);
 
       // 2. Try wg show (works if interface is up)
       res = await sshExecute(vps, `wg show ${iface} public-key`);
-      if (res.code === 0 && res.stdout.trim()) {
-        return res.stdout.trim();
-      }
+      key = extractKey(res.stdout);
+      if (res.code === 0 && key) return key;
       
       // 3. Fallback: Try docker if it's wg0 (wg-easy)
       if (iface === 'wg0') {
         res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
-        if (res.code === 0 && res.stdout.trim()) {
-          return res.stdout.trim();
-        }
+        key = extractKey(res.stdout);
+        if (res.code === 0 && key) return key;
       }
       
       throw new Error(`Could not retrieve public key for ${iface}. Last error: ${res.stderr || res.errorOutput || 'Unknown'}`);
@@ -2057,6 +2077,30 @@ ClientNames=${preSetupConfig.clientNames}
         addLog(`Inter-VPS SSH Handshake Warning: ${errorMsg}`, "error", "exchange");
         addLog("Proceeding with deployment via client-orchestrated exchange.", "info", "exchange");
       }
+
+      // --- Phase 2.5: Network Link Verification ---
+      checkCancel();
+      addLog("Phase 2.5: Network Link Verification...", "info", "exchange");
+      
+      addLog(`VPS1 pinging VPS2 (${currentTunnel.vps2.ip})...`, "cmd", "vps1");
+      const ping1 = await sshExecute(currentTunnel.vps1, `ping -c 3 -W 5 ${currentTunnel.vps2.ip}`);
+      if (ping1.code !== 0) {
+        addLog(`WARNING: VPS1 cannot ping VPS2. Network might be blocked.`, "warn", "vps1");
+      } else {
+        addLog(`VPS1 to VPS2 ping successful.`, "success", "vps1");
+      }
+
+      addLog(`VPS2 pinging VPS1 (${currentTunnel.vps1.ip})...`, "cmd", "vps2");
+      const ping2 = await sshExecute(currentTunnel.vps2, `ping -c 3 -W 5 ${currentTunnel.vps1.ip}`);
+      if (ping2.code !== 0) {
+        addLog(`WARNING: VPS2 cannot ping VPS1. Network might be blocked.`, "warn", "vps2");
+      } else {
+        addLog(`VPS2 to VPS1 ping successful.`, "success", "vps2");
+      }
+      
+      addLog(`Tracing route from VPS1 to VPS2...`, "cmd", "vps1");
+      await sshExecute(currentTunnel.vps1, `apt-get install -y traceroute && traceroute -m 15 ${currentTunnel.vps2.ip}`);
+      addLog(`Network Link Verification Complete.`, "success", "exchange");
 
       // --- Configuration Phase ---
       addLog("Phase 3: Deterministic Configuration Sequence...", "info", "exchange");
