@@ -476,17 +476,40 @@ NEW_PUB=$(echo "$NEW_PRIV" | wg pubkey)
 # 3. Exchange Keys with VPS2
 # We use the existing secure tunnel (10.9.0.254) to push the new public key
 echo "Exchanging keys: Sending new VPS1 public key to VPS2 via secure tunnel (10.9.0.254)..."
+
+# Check if VPS2 is reachable via the tunnel first
+if ! ping -c 1 -W 5 10.9.0.254 > /dev/null; then
+    echo "ERROR: VPS2 (10.9.0.254) is not reachable via the tunnel. Aborting key exchange."
+    exit 1
+fi
+
 # Note: The app should have added VPS1's public key to VPS2's authorized_keys during setup
-ssh -o StrictHostKeyChecking=no root@10.9.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"
+# Using ConnectTimeout and BatchMode to prevent hanging on connection issues or password prompts
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"; then
+    echo "ERROR: Failed to send public key to VPS2 via SSH. Check if SSH keys are authorized."
+    exit 1
+fi
 
 # 4. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
 echo "Recording new private key into /etc/wireguard/wg1.conf..."
 sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
 
 # 5. Reload WireGuard
-systemctl restart wg-quick@wg1
+echo "Restarting wg-quick@wg1 to apply new keys..."
+if ! systemctl restart wg-quick@wg1; then
+    echo "ERROR: Failed to restart wg-quick@wg1. Check system logs."
+    exit 1
+fi
 
-# 6. Log Rotation
+# 6. Verify Interface is Up
+if ! wg show wg1 > /dev/null; then
+    echo "ERROR: wg1 interface is not active after restart."
+    exit 1
+fi
+
+echo "Key rotation and exchange successful!"
+
+# 7. Log Rotation
 mkdir -p /root/DTLogs
 echo "Key rotation completed at $(date)" >> /root/DTLogs/lodgeguard-sync.txt
 `
@@ -2378,7 +2401,10 @@ wg show wg0
       if (pingCheck.code === 0) {
         addLog("Tunnel connectivity verified!", "success");
       } else {
-        addLog("Tunnel connectivity failed. VPS2 is not reachable via 10.9.0.254", "error");
+        addLog("CRITICAL ERROR: Tunnel connectivity failed. VPS2 is not reachable via 10.9.0.254", "error");
+        addLog("Aborting post-deployment sync to prevent system hang.", "error");
+        setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, status: 'failed' } : t));
+        return;
       }
 
       addLog("Verifying IP forwarding...", "cmd");
@@ -2403,13 +2429,28 @@ wg show wg0
         cat /root/.ssh/id_rsa.pub
       `;
       const vps1PubKeyRes = await sshExecute(activeTunnel.vps1, sshSetupCmd);
-      const vps1PubKey = vps1PubKeyRes.stdout.trim();
+      // Extract only the key part (starts with ssh-rsa or similar)
+      const vps1PubKeyMatch = vps1PubKeyRes.stdout.match(/(ssh-rsa|ssh-ed25519|ecdsa-sha2-nistp256|ssh-dss) [A-Za-z0-9+/=]+( .*)?/);
+      const vps1PubKey = vps1PubKeyMatch ? vps1PubKeyMatch[0].trim() : "";
       
       if (vps1PubKey) {
         addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd");
         await sshExecute(activeTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
+        
+        // Verify SSH access from VPS1 to VPS2
+        addLog("Verifying SSH access from VPS1 to VPS2...", "cmd");
+        const sshVerifyCmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo 'SSH_OK'"`;
+        const sshVerifyRes = await sshExecute(activeTunnel.vps1, sshVerifyCmd);
+        if (sshVerifyRes.stdout.includes("SSH_OK")) {
+          addLog("SSH access from VPS1 to VPS2 verified!", "success");
+        } else {
+          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed. Key rotation will not work.", "error");
+          addLog(`Error: ${sshVerifyRes.stderr || sshVerifyRes.errorOutput}`, "error");
+        }
+      } else {
+        addLog("CRITICAL ERROR: Could not retrieve VPS1 SSH public key.", "error");
       }
-
+      
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
       addLog("Running lodgeguard-sync.sh on VPS1...", "cmd");
       const syncRes = await sshExecute(activeTunnel.vps1, syncScript);
