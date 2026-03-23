@@ -582,6 +582,24 @@ if [ -f /etc/needrestart/needrestart.conf ]; then
   sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf || true
 fi
 
+# --- Pre-Deployment Verification ---
+log_step "Verifying current system status..."
+if command -v docker &> /dev/null; then
+  if systemctl is-active --quiet docker; then
+    log_step "Docker is installed and running."
+    if docker ps | grep -q wg-easy; then
+      log_step "WG-Easy container is currently running."
+    else
+      log_step "WG-Easy container is NOT running."
+    fi
+  else
+    log_step "Docker is installed but NOT running."
+  fi
+else
+  log_step "Docker is NOT installed."
+fi
+# -----------------------------------
+
 fix_docker() {
   log_step "Running Docker repair routine..."
   # 1. Check for Snap Docker and purge it
@@ -645,83 +663,67 @@ fix_docker() {
   fi
 }
 
-# 1. Update & Install
-log_step "Configuring robust DNS for installation..."
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "nameserver 1.1.1.1" >> /etc/resolv.conf
+# 1. Update & Install Official Docker
+log_step "Uninstalling old Docker versions..."
+apt-get remove -y docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc || true
 
-log_step "Updating system packages..."
+log_step "Installing Docker using official repository..."
 apt-get update || true
+apt-get install -y ca-certificates curl gnupg || true
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
+chmod a+r /etc/apt/keyrings/docker.asc || true
+# Add the repository to Apt sources:
+echo "Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\")
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.sources > /dev/null || true
 
-log_step "Installing critical networking tools early..."
-# Install iptables-persistent early while network is direct
-export DEBIAN_FRONTEND=noninteractive
-echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
-echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
-apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  iptables-persistent netfilter-persistent curl iproute2 || true
+apt-get update || true
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
 
-log_step "Checking WireGuard kernel module..."
-modprobe wireguard || true
-if ! lsmod | grep -q wireguard; then
-  log_step "WireGuard module not loaded. Installing headers and tools..."
-  apt-get install -y linux-headers-$(uname -r) wireguard-tools || true
-  modprobe wireguard || true
-fi
-
-if ! lsmod | grep -q wireguard; then
-  log_step "WireGuard module still not loaded. Trying wireguard-dkms..."
-  apt-get install -y wireguard-dkms || true
-  modprobe wireguard || true
-fi
-
-if ! lsmod | grep -q wireguard; then
-  log_step "CRITICAL: WireGuard kernel module could not be loaded. A system reboot is likely required."
-  echo "REBOOT_REQUIRED"
-  # We continue anyway, but it will likely fail later
-fi
-
-log_step "Installing WireGuard and Docker..."
-# Try openresolv first, fallback to resolvconf
-if ! apt-get install -y openresolv; then
-  log_step "openresolv not found, trying resolvconf..."
-  apt-get install -y resolvconf || true
-fi
-
-# Install WireGuard tools
-apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
-
-# Robust Docker Installation
-if ! command -v docker &> /dev/null; then
-  log_step "Docker not found. Attempting installation..."
-  # Try docker.io first (standard Ubuntu/Debian)
-  if ! apt-get install -y docker.io; then
-    log_step "docker.io installation failed. Trying alternative method..."
-    # Fallback to official docker repo if docker.io fails
-    apt-get install -y ca-certificates gnupg lsb-release || true
-    mkdir -p /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null || true
-    apt-get update || true
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
-  fi
-else
-  log_step "Docker is already installed."
-fi
-
-# Ensure docker-compose is available (v2)
-if ! docker compose version &> /dev/null; then
-  log_step "Installing docker-compose-v2..."
-  apt-get install -y docker-compose-v2 || true
-fi
-
-log_step "Starting Docker daemon..."
-systemctl unmask docker.service || true
-systemctl unmask docker.socket || true
-systemctl daemon-reload
+log_step "Starting and verifying Docker..."
 systemctl enable docker || true
 systemctl start docker || true
-wait_for_service "docker"
+if ! docker run --rm hello-world | grep -q "Hello from Docker!"; then
+  log_step "WARNING: Docker hello-world verification failed, but continuing..."
+fi
+log_step "Checking if reboot is required after Docker installation..."
+if [ -f /var/run/reboot-required ]; then
+  log_step "System requires a reboot. Marking for reboot..."
+  echo "REBOOT_REQUIRED"
+fi
+# 2. Setup WG-Easy (Client Gateway)
+log_step "Configuring WG-Easy in /etc/docker/containers/wg-easy..."
+mkdir -p /etc/docker/containers/wg-easy
+
+cat <<EOF > /etc/docker/containers/wg-easy/docker-compose.yml
+services:
+  wg-easy:
+    environment:
+      - WG_HOST=\${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+      - WG_MTU=1280
+      - PASSWORD=admin123
+      - WG_DEFAULT_DNS=1.1.1.1
+      - WG_ALLOWED_IPS=0.0.0.0/0
+      - WG_PORT=51820
+    image: ghcr.io/wg-easy/wg-easy
+    container_name: wg-easy
+    volumes:
+      - .:/etc/wireguard
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/tcp"
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+      - net.ipv4.ip_forward=1
+EOF
+cd /etc/docker/containers/wg-easy && docker compose up -d || true
 
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
@@ -742,35 +744,6 @@ echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
 sysctl -w net.ipv4.ip_forward=1 || true
 sysctl -p || true
 
-# 3. Setup WG-Easy (Client Gateway on wg0)
-log_step "Configuring WG-Easy (Client Gateway)..."
-mkdir -p /opt/wg-easy
-cat <<EOF > /opt/wg-easy/docker-compose.yml
-services:
-  wg-easy:
-    environment:
-      - WG_HOST=${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
-      - WG_MTU=1280
-      - PASSWORD=admin123
-      - WG_DEFAULT_DNS=1.1.1.1
-      - WG_ALLOWED_IPS=0.0.0.0/0
-      - WG_PORT=51820
-    image: weejewel/wg-easy
-    container_name: wg-easy
-    volumes:
-      - .:/etc/wireguard
-    ports:
-      - "51820:51820/udp"
-      - "51821:51821/tcp"
-    restart: unless-stopped
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv4.ip_forward=1
-EOF
-cd /opt/wg-easy && docker compose up -d || true
 log_step "Verifying WG-Easy container status..."
 sleep 5
 if ! docker ps | grep -q wg-easy; then
@@ -1017,34 +990,54 @@ fix_apt
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# 1. Update & Install
-log_step "Updating system packages..."
+# --- Pre-Deployment Verification ---
+log_step "Verifying current system status..."
+if command -v docker &> /dev/null; then
+  if systemctl is-active --quiet docker; then
+    log_step "Docker is installed and running."
+  else
+    log_step "Docker is installed but NOT running."
+  fi
+else
+  log_step "Docker is NOT installed."
+fi
+if systemctl is-active --quiet wg-quick@wg0; then
+  log_step "WireGuard (wg0) is currently running."
+else
+  log_step "WireGuard (wg0) is NOT running."
+fi
+# -----------------------------------
+
+# 1. Update & Install Official Docker
+log_step "Uninstalling old Docker versions..."
+apt-get remove -y docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc || true
+
+log_step "Installing Docker using official repository..."
 apt-get update || true
+apt-get install -y ca-certificates curl gnupg || true
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
+chmod a+r /etc/apt/keyrings/docker.asc || true
 
-log_step "Checking WireGuard kernel module..."
-modprobe wireguard || true
-if ! lsmod | grep -q wireguard; then
-  log_step "WireGuard module not loaded. Installing headers and tools..."
-  apt-get install -y linux-headers-$(uname -r) wireguard-tools || true
-  modprobe wireguard || true
-fi
+# Add the repository to Apt sources:
+echo "Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\")
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.sources > /dev/null || true
 
-if ! lsmod | grep -q wireguard; then
-  log_step "WireGuard module still not loaded. Trying wireguard-dkms..."
-  apt-get install -y wireguard-dkms || true
-  modprobe wireguard || true
-fi
+apt-get update || true
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
 
-if ! lsmod | grep -q wireguard; then
-  log_step "CRITICAL: WireGuard kernel module could not be loaded. A system reboot is likely required."
+log_step "Starting and verifying Docker..."
+systemctl enable docker || true
+systemctl start docker || true
+
+log_step "Checking if reboot is required after Docker installation..."
+if [ -f /var/run/reboot-required ]; then
+  log_step "System requires a reboot. Marking for reboot..."
   echo "REBOOT_REQUIRED"
 fi
-
-# Stop and remove previous versions
-log_step "Cleaning up previous installations..."
-systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
-systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
-rm -rf /etc/wireguard || true
 
 log_step "Installing WireGuard and networking tools..."
 # Try openresolv first, fallback to resolvconf
@@ -4669,11 +4662,11 @@ AllowedIPs = 10.8.0.0/24`}
                       <div className="space-y-3">
                         <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                           <span className="text-xs text-zinc-500 uppercase font-mono">Revision</span>
-                          <span className="text-xs text-blue-400 font-bold">R12</span>
+                          <span className="text-xs text-blue-400 font-bold">R13</span>
                         </div>
                         <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                           <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
-                          <span className="text-xs text-blue-400 font-bold">v1.1.2-win</span>
+                          <span className="text-xs text-blue-400 font-bold">v1.1.3-win</span>
                         </div>
                       <button className="w-full py-2 bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center justify-center gap-2 hover:bg-blue-400 transition-colors">
                         <Download className="w-4 h-4" />
@@ -4694,11 +4687,11 @@ AllowedIPs = 10.8.0.0/24`}
                       <div className="space-y-3">
                         <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                           <span className="text-xs text-zinc-500 uppercase font-mono">Revision</span>
-                          <span className="text-xs text-orange-400 font-bold">R12</span>
+                          <span className="text-xs text-orange-400 font-bold">R13</span>
                         </div>
                         <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                           <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
-                          <span className="text-xs text-orange-400 font-bold">v1.1.2-android</span>
+                          <span className="text-xs text-orange-400 font-bold">v1.1.3-android</span>
                         </div>
                       <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                         <span className="text-xs text-zinc-500 uppercase font-mono">Format</span>
