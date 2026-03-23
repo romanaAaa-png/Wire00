@@ -720,7 +720,7 @@ echo "$PUB_KEY" > /etc/wireguard/wg1.pub
 PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
 if [ -z "$PRIMARY_IF" ]; then PRIMARY_IF="eth0"; fi
 
-# Robust IP detection without grep -P
+# Robust IP detection
 PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
 if [ -z "$PRIMARY_IP" ]; then
   PRIMARY_IP=$(hostname -I | awk '{print $1}')
@@ -738,21 +738,27 @@ cat <<EOF > /etc/wireguard/wg1.conf
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
 MTU = 1280
+Table = off
 
-# ASYMMETRIC ROUTING PROTECTION: Prevents lockout and fixes "Bad Gateway" issues
-# Ensures all traffic originating from or arriving at the physical IP bypasses the WG tunnel
-PostUp = ip rule add from $PRIMARY_IP lookup main || true
-PostUp = ip rule add iif $PRIMARY_IF lookup main || true
-PostUp = iptables -A INPUT -i wg1 -j ACCEPT || true
-PostUp = iptables -A FORWARD -i wg1 -j ACCEPT || true
-PreDown = ip rule del from $PRIMARY_IP lookup main || true
-PreDown = ip rule del iif $PRIMARY_IF lookup main || true
-PreDown = iptables -D INPUT -i wg1 -j ACCEPT || true
-PreDown = iptables -D FORWARD -i wg1 -j ACCEPT || true
+# POLICY-BASED ROUTING: Only route VPN client traffic through VPS2
+# This prevents host SSH lockout and fixes "Bad Gateway" issues
+PostUp = ip route add default dev %i table 200 || true
+PostUp = ip rule add from 10.8.0.0/24 table 200 || true
+PostUp = ip rule add from 10.9.0.1 table 200 || true
+PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
+PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
+PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
+
+PreDown = ip route del default dev %i table 200 || true
+PreDown = ip rule del from 10.8.0.0/24 table 200 || true
+PreDown = ip rule del from 10.9.0.1 table 200 || true
+PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
+PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
 
 [Peer]
 PublicKey = __VPS2_WG0_PUB_KEY__
-Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51822
+Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
@@ -784,7 +790,7 @@ iptables -t nat -F
 # Allow SSH (Port 22) - CRITICAL for management
 iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 
-# Allow established and related connections (important for apt, curl, etc)
+# Allow established and related connections
 iptables -A INPUT -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 
@@ -795,9 +801,9 @@ iptables -A INPUT -i lo -j ACCEPT
 iptables -A INPUT -p udp --dport 51820 -j ACCEPT
 iptables -A INPUT -p udp --dport 51822 -j ACCEPT
 
-# Routing logic
+# Routing logic - Forward client traffic to wg1
+iptables -A FORWARD -s 10.8.0.0/24 -o wg1 -j ACCEPT
 iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o wg1 -j MASQUERADE
-iptables -A FORWARD -i wg0 -o wg1 -j ACCEPT
 
 # Ensure SSH remains accessible on physical interface
 iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE
@@ -944,16 +950,18 @@ cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.254/24
-ListenPort = 51822
+ListenPort = 51820
 MTU = 1280
-PostUp = iptables -A INPUT -i wg0 -j ACCEPT || true
-PostUp = iptables -A FORWARD -i wg0 -j ACCEPT || true
-PreDown = iptables -D INPUT -i wg0 -j ACCEPT || true
-PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
+
+# EXIT NODE ROUTING: Forward traffic from VPS1 to the Internet
+PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
+PostUp = iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1) -j MASQUERADE || true
+PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1) -j MASQUERADE || true
 
 [Peer]
 PublicKey = __VPS1_WG1_PUB_KEY__
-AllowedIPs = 10.9.0.0/24
+AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
 
 log_step "Starting wg0 interface..."
