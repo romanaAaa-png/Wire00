@@ -573,38 +573,6 @@ if [ -f /etc/needrestart/needrestart.conf ]; then
   sed -i "s/#\$nrconf{restart} = 'i';/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf || true
 fi
 
-wait_for_service() {
-  local service=$1
-  local max_attempts=15
-  local attempt=1
-  log_step "Waiting for $service to be active..."
-  while ! systemctl is-active --quiet "$service"; do
-    if [ $attempt -ge $max_attempts ]; then
-      log_step "ERROR: $service failed to start after $max_attempts attempts."
-      log_step "--- Service Status ---"
-      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
-      log_step "--- Recent Logs ---"
-      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
-      if [ "$service" == "docker" ]; then
-        log_step "Attempting to fix Docker..."
-        fix_docker
-        # Retry once after fix
-        systemctl start docker || true
-        sleep 5
-        if systemctl is-active --quiet "docker"; then
-          log_step "Docker is now active after fix."
-          return 0
-        fi
-      fi
-      exit 1
-    fi
-    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
-    sleep 3
-    attempt=$((attempt + 1))
-  done
-  log_step "$service is now active."
-}
-
 fix_docker() {
   log_step "Running Docker repair routine..."
   # 1. Check for Snap Docker and purge it
@@ -680,15 +648,15 @@ if ! lsmod | grep -q wireguard; then
 fi
 
 log_step "Installing WireGuard and Docker..."
-# Remove any potential snap docker to avoid conflicts
-if command -v snap &> /dev/null; then
-  snap remove docker || true
+# Try openresolv first, fallback to resolvconf
+if ! apt-get install -y openresolv; then
+  log_step "openresolv not found, trying resolvconf..."
+  apt-get install -y resolvconf || true
 fi
 
 # Install with non-interactive flags
-# Use openresolv as it is more reliable for wg-quick on modern Ubuntu
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  wireguard iptables docker.io docker-compose-v2 openresolv || true
+  wireguard wireguard-tools iptables docker.io docker-compose-v2 || true
 
 log_step "Starting Docker daemon..."
 systemctl unmask docker.service || true
@@ -956,32 +924,10 @@ trap collect_debug_info EXIT
 
 log_step "--- Starting VPS2 Exit Node Setup ---"
 export DEBIAN_FRONTEND=noninteractive
-
-wait_for_service() {
-  local service=$1
-  local max_attempts=10
-  local attempt=1
-  log_step "Waiting for $service to be active..."
-  while ! systemctl is-active --quiet "$service"; do
-    if [ $attempt -ge $max_attempts ]; then
-      log_step "ERROR: $service failed to start after $max_attempts attempts."
-      log_step "--- Service Status ---"
-      systemctl status "$service" >> "$LOG_FILE" 2>&1 || true
-      log_step "--- Recent Logs ---"
-      journalctl -xeu "$service" -n 50 >> "$LOG_FILE" 2>&1 || true
-      exit 1
-    fi
-    log_step "Attempt $attempt/$max_attempts: $service is not active yet. Sleeping 3s..."
-    sleep 3
-    attempt=$((attempt + 1))
-  done
-  log_step "$service is now active."
-}
+export NEEDRESTART_MODE=a
 
 # 1. Update & Install
 log_step "Updating system packages..."
-export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
 apt-get update || true
 
 log_step "Checking WireGuard kernel module..."
@@ -999,7 +945,12 @@ systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
 rm -rf /etc/wireguard || true
 
 log_step "Installing WireGuard and networking tools..."
-apt-get install -y wireguard iptables curl iproute2 openresolv || true
+# Try openresolv first, fallback to resolvconf
+if ! apt-get install -y openresolv; then
+  log_step "openresolv not found, trying resolvconf..."
+  apt-get install -y resolvconf || true
+fi
+apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
