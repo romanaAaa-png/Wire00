@@ -59,6 +59,7 @@ declare global {
       receive: (channel: string, func: (...args: any[]) => void) => void;
       readFile: (filePath: string) => Promise<{ data?: string; error?: string }>;
       selectFile: () => Promise<string | null>;
+      writeFile: (filePath: string, data: string) => Promise<{ success: boolean; error?: string }>;
       fixWindowsBlocking: () => Promise<{ success: boolean; error?: string }>;
     };
   }
@@ -107,7 +108,7 @@ interface Tunnel {
   vps2: VPSConfig;
   status: 'idle' | 'deploying' | 'deployed' | 'failed';
   step: number;
-  logs: { msg: string, type: 'info' | 'success' | 'error' | 'cmd', vps?: 'vps1' | 'vps2' }[];
+  logs: { msg: string, type: 'info' | 'success' | 'error' | 'cmd', vps?: 'vps1' | 'vps2' | 'exchange' }[];
   peers: Peer[];
   createdAt: string;
 }
@@ -552,9 +553,9 @@ do_prepare() {
   export DEBIAN_FRONTEND=noninteractive
   export NEEDRESTART_MODE=a
 
-  log_step "prepare" "Installing Docker & WireGuard Tools..."
+  log_step "prepare" "Installing Docker, WireGuard Tools & SSH Tools..."
   apt-get update || true
-  apt-get install -y ca-certificates curl gnupg wireguard wireguard-tools iptables iproute2 || true
+  apt-get install -y -o Dpkg::Options::="--force-confnew" ca-certificates curl gnupg wireguard wireguard-tools iptables iproute2 sshpass || true
   
   # Docker Installation
   if ! command -v docker &> /dev/null; then
@@ -567,7 +568,7 @@ Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\"
 Components: stable
 Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.sources > /dev/null || true
     apt-get update || true
-    apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
+    apt-get install -y -o Dpkg::Options::="--force-confnew" docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
   fi
 
   systemctl enable docker || true
@@ -749,7 +750,7 @@ do_prepare() {
 
   log_step "prepare" "Installing WireGuard & Tools..."
   apt-get update || true
-  apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
+  apt-get install -y -o Dpkg::Options::="--force-confnew" wireguard wireguard-tools iptables curl iproute2 || true
 
   log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
   mkdir -p /etc/wireguard
@@ -1019,7 +1020,7 @@ export DEBIAN_FRONTEND=noninteractive
 if command -v snap &> /dev/null; then
   snap remove docker || true
 fi
-apt-get purge -y wireguard wireguard-tools docker.io docker-compose-v2 iptables-persistent
+apt-get purge -y -o Dpkg::Options::="--force-confnew" wireguard wireguard-tools docker.io docker-compose-v2 iptables-persistent
 apt-get autoremove -y
 apt-get clean
 
@@ -1300,6 +1301,9 @@ pause
     vps1Password: '',
     vps2Ip: '',
     vps2Password: '',
+    vps1Wg0Pub: '',
+    vps1Wg1Pub: '',
+    vps2Wg0Pub: '',
     clientCount: 5,
     clientNames: 'Client1, Client2, Client3, Client4, Client5',
     setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
@@ -1326,17 +1330,26 @@ pause
       if (currentSection === 'VPS1') {
         if (k === 'IP') newConfig.vps1Ip = value;
         if (k === 'PASSWORD') newConfig.vps1Password = value;
+        if (k === 'WG0_PUB') newConfig.vps1Wg0Pub = value;
+        if (k === 'WG1_PUB') newConfig.vps1Wg1Pub = value;
       } else if (currentSection === 'VPS2') {
         if (k === 'IP') newConfig.vps2Ip = value;
         if (k === 'PASSWORD') newConfig.vps2Password = value;
+        if (k === 'WG0_PUB') newConfig.vps2Wg0Pub = value;
       } else if (currentSection === 'WIREGUARD') {
         if (k === 'CLIENTCOUNT') newConfig.clientCount = parseInt(value) || 5;
         if (k === 'CLIENTNAMES') newConfig.clientNames = value;
+        if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
+        if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
+        if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
       } else {
         if (k === 'VPS1_IP') newConfig.vps1Ip = value;
         if (k === 'VPS1_PASSWORD') newConfig.vps1Password = value;
         if (k === 'VPS2_IP') newConfig.vps2Ip = value;
         if (k === 'VPS2_PASSWORD') newConfig.vps2Password = value;
+        if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
+        if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
+        if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
         if (k === 'CLIENT_COUNT') newConfig.clientCount = parseInt(value) || 5;
         if (k === 'CLIENT_NAMES') newConfig.clientNames = value;
       }
@@ -1385,8 +1398,19 @@ pause
         const newConfig = parseIniContent(result.data);
         setPreSetupConfig(newConfig);
         updateActiveTunnel({
-          vps1: { ...activeTunnel.vps1, ip: newConfig.vps1Ip, password: newConfig.vps1Password },
-          vps2: { ...activeTunnel.vps2, ip: newConfig.vps2Ip, password: newConfig.vps2Password }
+          vps1: { 
+            ...activeTunnel.vps1, 
+            ip: newConfig.vps1Ip, 
+            password: newConfig.vps1Password,
+            wg0PublicKey: newConfig.vps1Wg0Pub || activeTunnel.vps1.wg0PublicKey,
+            wg1PublicKey: newConfig.vps1Wg1Pub || activeTunnel.vps1.wg1PublicKey
+          },
+          vps2: { 
+            ...activeTunnel.vps2, 
+            ip: newConfig.vps2Ip, 
+            password: newConfig.vps2Password,
+            wg0PublicKey: newConfig.vps2Wg0Pub || activeTunnel.vps2.wg0PublicKey
+          }
         });
         addLog("Configuration loaded successfully from setup.ini and applied to current project.", "success");
       }
@@ -1509,10 +1533,13 @@ pause
     const content = `[VPS1]
 IP=${preSetupConfig.vps1Ip || activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
 Password=${preSetupConfig.vps1Password || activeTunnel.vps1.password || '********'}
+WG0_PUB=${activeTunnel.vps1.wg0PublicKey || ''}
+WG1_PUB=${activeTunnel.vps1.wg1PublicKey || ''}
 
 [VPS2]
 IP=${preSetupConfig.vps2Ip || activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
 Password=${preSetupConfig.vps2Password || activeTunnel.vps2.password || '********'}
+WG0_PUB=${activeTunnel.vps2.wg0PublicKey || ''}
 
 [WireGuard]
 ClientCount=${preSetupConfig.clientCount}
@@ -1530,11 +1557,45 @@ ClientNames=${preSetupConfig.clientNames}
     addLog("Pre-setup configuration (setup.ini) generated and downloaded.", "success");
   };
 
+  const saveSetupIni = async () => {
+    if (!window.electron || !window.electron.writeFile) {
+      addLog("This feature is only available in the Desktop version.", "error");
+      return;
+    }
+
+    const content = `[VPS1]
+IP=${preSetupConfig.vps1Ip || activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+Password=${preSetupConfig.vps1Password || activeTunnel.vps1.password || '********'}
+WG0_PUB=${activeTunnel.vps1.wg0PublicKey || ''}
+WG1_PUB=${activeTunnel.vps1.wg1PublicKey || ''}
+
+[VPS2]
+IP=${preSetupConfig.vps2Ip || activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
+Password=${preSetupConfig.vps2Password || activeTunnel.vps2.password || '********'}
+WG0_PUB=${activeTunnel.vps2.wg0PublicKey || ''}
+
+[WireGuard]
+ClientCount=${preSetupConfig.clientCount}
+ClientNames=${preSetupConfig.clientNames}
+`;
+
+    try {
+      const result = await window.electron.writeFile(preSetupConfig.setupIniPath, content);
+      if (result.success) {
+        addLog(`Configuration saved successfully to: ${preSetupConfig.setupIniPath}`, "success");
+      } else {
+        addLog(`Error saving setup.ini: ${result.error}`, "error");
+      }
+    } catch (err: any) {
+      addLog(`Failed to save setup.ini: ${err.message}`, "error");
+    }
+  };
+
   const updateActiveTunnel = (updates: Partial<Tunnel>) => {
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, ...updates } : t));
   };
 
-  const addLog = (msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info', vps?: 'vps1' | 'vps2') => {
+  const addLog = (msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info', vps?: 'vps1' | 'vps2' | 'exchange') => {
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type, vps }] } : t));
   };
 
@@ -1886,38 +1947,54 @@ ClientNames=${preSetupConfig.clientNames}
       }
 
       // --- Key Retrieval Phase ---
-      addLog("Phase 2: Out-of-band Key Exchange (via Public SSH)...", "info");
+      addLog("Phase 2: Out-of-band Key Exchange (via Public SSH)...", "info", "exchange");
       
-      addLog("Retrieving VPS1 Public Key...", "info", "vps1");
+      addLog("Retrieving VPS1 Public Key...", "info", "exchange");
       d_vps1_wg1_pub = await getVpsPublicKey(currentTunnel.vps1, 'wg1');
       if (!d_vps1_wg1_pub) throw new Error("Failed to retrieve VPS1 Public Key.");
-      addLog(`VPS1 Key: ${d_vps1_wg1_pub.substring(0, 10)}...`, "success", "vps1");
+      addLog(`VPS1 Key: ${d_vps1_wg1_pub.substring(0, 10)}...`, "success", "exchange");
 
-      addLog("Retrieving VPS2 Public Key...", "info", "vps2");
+      addLog("Retrieving VPS2 Public Key...", "info", "exchange");
       d_vps2_wg0_pub = await getVpsPublicKey(currentTunnel.vps2, 'wg0');
       if (!d_vps2_wg0_pub) throw new Error("Failed to retrieve VPS2 Public Key.");
-      addLog(`VPS2 Key: ${d_vps2_wg0_pub.substring(0, 10)}...`, "success", "vps2");
+      addLog(`VPS2 Key: ${d_vps2_wg0_pub.substring(0, 10)}...`, "success", "exchange");
+
+      // --- Phase 2.1: Inter-VPS SSH Handshake (User Requested) ---
+      checkCancel();
+      addLog("Phase 2.1: Inter-VPS SSH Handshake (VPS1 -> VPS2)...", "info", "exchange");
+      addLog(`VPS1 attempting temporary SSH connection to VPS2 (${currentTunnel.vps2.ip}) for key validation...`, "cmd", "vps1");
+      
+      const handshakeCmd = `sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${currentTunnel.vps2.ip} "echo 'HANDSHAKE_OK: VPS1 successfully reached VPS2 via SSH'"`;
+      const handshakeRes = await sshExecute(currentTunnel.vps1, handshakeCmd);
+      
+      if (handshakeRes.code === 0 && handshakeRes.stdout.includes("HANDSHAKE_OK")) {
+        addLog("Inter-VPS SSH Handshake Successful! Direct connectivity verified.", "success", "exchange");
+      } else {
+        const errorMsg = handshakeRes.stderr || handshakeRes.errorOutput || "Unknown SSH Error";
+        addLog(`Inter-VPS SSH Handshake Warning: ${errorMsg}`, "error", "exchange");
+        addLog("Proceeding with deployment via client-orchestrated exchange.", "info", "exchange");
+      }
 
       // --- Configuration Phase ---
-      addLog("Phase 3: Deterministic Configuration Sequence...", "info");
+      addLog("Phase 3: Deterministic Configuration Sequence...", "info", "exchange");
 
       // 1. Configure VPS2 (Exit Node) first
       checkCancel();
-      addLog("Configuring VPS2 (Exit Node) with VPS1 Key...", "info", "vps2");
+      addLog("Configuring VPS2 (Exit Node) with VPS1 Key...", "info", "exchange");
       const vps2Result = await sshExecute(currentTunnel.vps2, `bash -s -- configure "${d_vps1_wg1_pub}" << '_EOF_LODGEGUARD_'\n${vps2SetupRaw}\n_EOF_LODGEGUARD_`);
       if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
         throw new Error(`VPS2 Configuration Failed: ${vps2Result.stderr || vps2Result.errorOutput}`);
       }
-      addLog("VPS2 Configuration Complete & wg0 interface started.", "success", "vps2");
+      addLog("VPS2 Configuration Complete & wg0 interface started.", "success", "exchange");
 
       // 2. Configure VPS1 (Gateway)
       checkCancel();
-      addLog("Configuring VPS1 (Gateway) with VPS2 Key...", "info", "vps1");
+      addLog("Configuring VPS1 (Gateway) with VPS2 Key...", "info", "exchange");
       const vps1Result = await sshExecute(currentTunnel.vps1, `bash -s -- configure "${d_vps2_wg0_pub}" << '_EOF_LODGEGUARD_'\n${vps1SetupRaw}\n_EOF_LODGEGUARD_`);
       if (vps1Result.code !== 0 && vps1Result.code !== undefined) {
         throw new Error(`VPS1 Configuration Failed: ${vps1Result.stderr || vps1Result.errorOutput}`);
       }
-      addLog("VPS1 Configuration Complete & wg1 interface started.", "success", "vps1");
+      addLog("VPS1 Configuration Complete & wg1 interface started.", "success", "exchange");
 
       // Extract VPS1 WG0 Key (for clients)
       const vps1Wg0PubMatch = vps1Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
@@ -1969,10 +2046,10 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Double VPN Deployment Successful!", "success");
 
       // --- Post-Deployment Key Update Phase ---
-      addLog("Initiating Post-Deployment Key Update & Sync...", "info");
+      addLog("Initiating Post-Deployment Key Update & Sync...", "info", "exchange");
       
       // 1. Setup SSH Key on VPS1 and add to VPS2 for sync script
-      addLog("Configuring SSH access from VPS1 to VPS2 for automated sync...", "info");
+      addLog("Configuring SSH access from VPS1 to VPS2 for automated sync...", "info", "exchange");
       const sshSetupCmd = `
         if [ ! -f /root/.ssh/id_rsa ]; then
           ssh-keygen -t rsa -b 4096 -f /root/.ssh/id_rsa -N ""
@@ -1985,30 +2062,30 @@ ClientNames=${preSetupConfig.clientNames}
       const vps1PubKey = vps1PubKeyMatch ? vps1PubKeyMatch[0].trim() : "";
       
       if (vps1PubKey) {
-        addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd", "vps2");
+        addLog("Adding VPS1 SSH key to VPS2 authorized_keys...", "cmd", "exchange");
         await sshExecute(currentTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
         
         // Verify SSH access from VPS1 to VPS2
-        addLog("Verifying SSH access from VPS1 to VPS2...", "cmd", "vps1");
+        addLog("Verifying SSH access from VPS1 to VPS2...", "cmd", "exchange");
         const sshVerifyCmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo 'SSH_OK'"`;
         const sshVerifyRes = await sshExecute(currentTunnel.vps1, sshVerifyCmd);
         if (sshVerifyRes.stdout.includes("SSH_OK")) {
-          addLog("SSH access from VPS1 to VPS2 verified!", "success", "vps1");
+          addLog("SSH access from VPS1 to VPS2 verified!", "success", "exchange");
         } else {
-          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed. Key rotation will not work.", "error", "vps1");
-          addLog(`Error: ${sshVerifyRes.stderr || sshVerifyRes.errorOutput}`, "error", "vps1");
+          addLog("CRITICAL ERROR: SSH access from VPS1 to VPS2 failed. Key rotation will not work.", "error", "exchange");
+          addLog(`Error: ${sshVerifyRes.stderr || sshVerifyRes.errorOutput}`, "error", "exchange");
         }
       } else {
-        addLog("CRITICAL ERROR: Could not retrieve VPS1 SSH public key.", "error", "vps1");
+        addLog("CRITICAL ERROR: Could not retrieve VPS1 SSH public key.", "error", "exchange");
       }
       
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
-      addLog(`Running lodgeguard-sync.sh on VPS1 targeting VPS2 Public IP (${currentTunnel.vps2.ip})...`, "cmd", "vps1");
+      addLog(`Running lodgeguard-sync.sh on VPS1 targeting VPS2 Public IP (${currentTunnel.vps2.ip})...`, "cmd", "exchange");
       const syncRes = await sshExecute(currentTunnel.vps1, `bash -s -- "${currentTunnel.vps2.ip}" << '_EOF_LODGEGUARD_'\n${syncScript}\n_EOF_LODGEGUARD_`);
       if (syncRes.code === 0 || syncRes.code === undefined) {
-        addLog("All VPS WireGuard keys have been updated and synchronized.", "success", "vps1");
+        addLog("All VPS WireGuard keys have been updated and synchronized.", "success", "exchange");
       } else {
-        addLog(`Key synchronization failed: ${syncRes.stderr || syncRes.errorOutput}`, "error", "vps1");
+        addLog(`Key synchronization failed: ${syncRes.stderr || syncRes.errorOutput}`, "error", "exchange");
       }
 
     } catch (error: any) {
@@ -2699,6 +2776,14 @@ PersistentKeepalive = 25`;
                             >
                               <Download className="w-4 h-4" />
                               <span className="text-[10px] font-bold uppercase">Load</span>
+                            </button>
+                            <button 
+                              onClick={saveSetupIni}
+                              className="px-3 py-2 bg-blue-600 border border-blue-500 rounded-lg text-white hover:bg-blue-500 transition-colors flex items-center gap-2"
+                              title="Save configuration to file"
+                            >
+                              <Save className="w-4 h-4" />
+                              <span className="text-[10px] font-bold uppercase">Save</span>
                             </button>
                           </div>
                           <p className="text-[8px] text-zinc-600 italic">The deployment tool will look for its configuration at this location.</p>
@@ -3479,12 +3564,15 @@ PersistentKeepalive = 25`;
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
                           <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG1 Public Key (Tunnel to VPS2)</label>
-                          <button 
-                            onClick={() => handleCopy(activeTunnel.vps1.wg1PublicKey || '', 'vps1-wg1-pub')}
-                            className="text-zinc-500 hover:text-emerald-500 transition-colors"
-                          >
-                            {copied === 'vps1-wg1-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg1 public-key' in terminal</span>
+                            <button 
+                              onClick={() => handleCopy(activeTunnel.vps1.wg1PublicKey || '', 'vps1-wg1-pub')}
+                              className="text-zinc-500 hover:text-emerald-500 transition-colors"
+                            >
+                              {copied === 'vps1-wg1-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                            </button>
+                          </div>
                         </div>
                         <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
                           <input 
@@ -3500,12 +3588,15 @@ PersistentKeepalive = 25`;
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
                           <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG0 Public Key (Client Gateway)</label>
-                          <button 
-                            onClick={() => handleCopy(activeTunnel.vps1.wg0PublicKey || '', 'vps1-wg0-pub')}
-                            className="text-zinc-500 hover:text-emerald-500 transition-colors"
-                          >
-                            {copied === 'vps1-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg0 public-key' in terminal</span>
+                            <button 
+                              onClick={() => handleCopy(activeTunnel.vps1.wg0PublicKey || '', 'vps1-wg0-pub')}
+                              className="text-zinc-500 hover:text-emerald-500 transition-colors"
+                            >
+                              {copied === 'vps1-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                            </button>
+                          </div>
                         </div>
                         <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
                           <input 
@@ -3536,12 +3627,15 @@ PersistentKeepalive = 25`;
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
                           <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG0 Public Key (Tunnel from VPS1)</label>
-                          <button 
-                            onClick={() => handleCopy(activeTunnel.vps2.wg0PublicKey || '', 'vps2-wg0-pub')}
-                            className="text-zinc-500 hover:text-emerald-500 transition-colors"
-                          >
-                            {copied === 'vps2-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg0 public-key' in terminal</span>
+                            <button 
+                              onClick={() => handleCopy(activeTunnel.vps2.wg0PublicKey || '', 'vps2-wg0-pub')}
+                              className="text-zinc-500 hover:text-emerald-500 transition-colors"
+                            >
+                              {copied === 'vps2-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                            </button>
+                          </div>
                         </div>
                         <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
                           <input 
@@ -4093,6 +4187,35 @@ PersistentKeepalive = 25`;
                                 </div>
                               )}
                               {activeTunnel.logs.filter(l => l.vps === 'vps2').map((log, i) => (
+                                <div key={i} className={cn(
+                                  "flex gap-3",
+                                  log.type === 'error' ? "text-red-400" : 
+                                  log.type === 'success' ? "text-emerald-400" : 
+                                  log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
+                                )}>
+                                  <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
+                                  <span className="break-all">
+                                    {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
+                                    {log.msg}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Inter-VPS Exchange Logs */}
+                          <div className="flex flex-col space-y-2 lg:col-span-2">
+                            <div className="flex items-center gap-2 px-1">
+                              <ArrowRightLeft className="w-3 h-3 text-blue-500" />
+                              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">VPS1 ↔ VPS2 Exchange Logs</span>
+                            </div>
+                            <div className="bg-zinc-950 rounded-xl border border-zinc-800 p-4 h-[300px] overflow-y-auto font-mono text-[11px] space-y-2 scrollbar-thin scrollbar-thumb-zinc-800">
+                              {activeTunnel.logs.filter(l => l.vps === 'exchange').length === 0 && (
+                                <div className="h-full flex flex-col items-center justify-center text-zinc-600 space-y-2">
+                                  <p>Waiting for inter-VPS exchange activity...</p>
+                                </div>
+                              )}
+                              {activeTunnel.logs.filter(l => l.vps === 'exchange').map((log, i) => (
                                 <div key={i} className={cn(
                                   "flex gap-3",
                                   log.type === 'error' ? "text-red-400" : 
