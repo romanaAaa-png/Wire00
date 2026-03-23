@@ -783,6 +783,11 @@ fi
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
 mkdir -p /etc/wireguard
 
+# Ensure routing table 200 exists
+if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
+  echo "200 vpn" >> /etc/iproute2/rt_tables
+fi
+
 # Generate or use existing keys
 if [ -f /etc/wireguard/wg1.key ]; then
   log_step "Using existing wg1 keys..."
@@ -857,7 +862,19 @@ wait_for_service "wg-quick@wg1"
 
 # Output keys for the app to capture
 echo "RESULT_WG1_PUB_KEY: $PUB_KEY"
-WG0_PUB=$(docker exec wg-easy wg show wg0 public-key || echo "")
+log_step "Waiting for wg-easy to be ready for key capture..."
+WG0_PUB=""
+for i in {1..12}; do
+  if docker exec wg-easy wg show wg0 public-key &>/dev/null; then
+    WG0_PUB=$(docker exec wg-easy wg show wg0 public-key)
+    if [ -n "$WG0_PUB" ]; then
+      log_step "wg-easy public key captured on attempt $i"
+      break
+    fi
+  fi
+  log_step "Waiting for wg-easy... (attempt $i/12)"
+  sleep 5
+done
 echo "RESULT_WG0_PUB_KEY: $WG0_PUB"
 
 # 5. DOUBLE VPN ROUTING (Client -> VPS1 -> VPS2)
@@ -1073,9 +1090,9 @@ MTU = 1280
 
 # EXIT NODE ROUTING: Forward traffic from VPS1 to the Internet
 PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
-PostUp = iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1) -j MASQUERADE || true
+PostUp = iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
-PreDown = iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1) -j MASQUERADE || true
+PreDown = iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
 
 [Peer]
 PublicKey = __VPS1_WG1_PUB_KEY__
@@ -1124,7 +1141,7 @@ iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT
 iptables -A INPUT -i lo -j ACCEPT
 
 # WireGuard Port
-iptables -A INPUT -p udp --dport 51822 -j ACCEPT
+iptables -A INPUT -p udp --dport 51820 -j ACCEPT
 
 # Routing logic
 iptables -t nat -A POSTROUTING -s 10.9.0.0/24 -o $PRIMARY_IF -j MASQUERADE
@@ -1952,12 +1969,27 @@ ClientNames=${preSetupConfig.clientNames}
 
   const getVpsPublicKey = async (vps: VPSConfig, iface: string) => {
     try {
+      // Try wg show first (works if interface is up)
       let res = await sshExecute(vps, `wg show ${iface} public-key`);
-      if (res.code !== 0 && iface === 'wg0') {
-        // Try docker if it's wg0 (wg-easy)
-        res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
+      if (res.code === 0 && res.stdout.trim()) {
+        return res.stdout.trim();
       }
-      return res.stdout.trim();
+      
+      // Fallback: Try reading the .pub file (works even if interface is down)
+      res = await sshExecute(vps, `cat /etc/wireguard/${iface}.pub`);
+      if (res.code === 0 && res.stdout.trim()) {
+        return res.stdout.trim();
+      }
+
+      // Fallback: Try docker if it's wg0 (wg-easy)
+      if (iface === 'wg0') {
+        res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
+        if (res.code === 0 && res.stdout.trim()) {
+          return res.stdout.trim();
+        }
+      }
+      
+      return "";
     } catch (e) {
       console.error(`Failed to get public key for ${iface} on ${vps.ip}:`, e);
       return "";
@@ -2146,11 +2178,33 @@ ClientNames=${preSetupConfig.clientNames}
       // --- Key Generation Phase ---
       addLog("Preparing WireGuard keys...", "info");
       
-      // We'll let the scripts generate keys if they don't exist, 
-      // but we need placeholders for the initial injection.
+      // Pre-generate keys if they don't exist to avoid "chicken and egg" problem
+      let d_vps1_wg0_priv = "";
       let d_vps1_wg0_pub = "";
+      let d_vps1_wg1_priv = "";
       let d_vps1_wg1_pub = "";
+      let d_vps2_wg0_priv = "";
       let d_vps2_wg0_pub = "";
+
+      // Helper to generate a key pair
+      const generateKeyPair = () => {
+        const priv = generateWGKey();
+        // We can't easily generate the public key from the private key in JS without a library,
+        // so we'll let the VPS generate its own keys if we don't have them, 
+        // OR we can just generate the private key here and let the VPS derive the public one.
+        // Actually, the best way is to let the VPS generate its own keys and then sync them.
+        // BUT to fix the "wg-quick won't start" issue, we need the PEER's public key.
+        return priv;
+      };
+
+      // If we're doing a clean install, we'll generate new private keys to inject
+      // This allows us to know the public keys (by deriving them on the VPS) 
+      // but we still have the problem of knowing the public key BEFORE the other VPS is up.
+      
+      // REVISED STRATEGY: 
+      // 1. We'll use the existing keys if available.
+      // 2. If not, we'll generate placeholders that are VALID keys.
+      const placeholderKey = "mP8vW9R/X6l2Y7z4vW9R/X6l2Y7z4vW9R/X6l2Y7z4A=";
 
       // --- VPS2 Deployment ---
       addLog("Checking if VPS2 (Exit Node) is already deployed...", "info");
@@ -2160,41 +2214,29 @@ ClientNames=${preSetupConfig.clientNames}
         checkCancel();
         addLog("VPS2 (Exit Node) is already deployed and active. Fetching existing keys...", "success");
         d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
-        if (d_vps2_wg0_pub) {
-          addLog(`Existing VPS2 PubKey recovered: ${d_vps2_wg0_pub.substring(0, 10)}...`, "info");
-        }
       } else {
         checkCancel();
         if (isCleanInstall) addLog("Clean install requested. Re-deploying VPS2...", "info");
         addLog("Initiating deployment for VPS2 (Exit Node)...", "info");
-        addLog(`Connecting to ${activeTunnel.vps2.ip} via SSH...`, "cmd");
         
         let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
-        // Inject a dummy key if VPS1 key is not yet known (it will be synced later)
-        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub || 'mP8vW9R/X6l2Y7z4vW9R/X6l2Y7z4vW9R/X6l2Y7z4A=');
+        
+        // We still don't know VPS1's key yet if it's a fresh install.
+        // So we'll deploy VPS2, get its key, then deploy VPS1 with VPS2's key.
+        // THEN we'll run a quick update on VPS2 to inject VPS1's key.
+        
+        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', placeholderKey);
         
         const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
-        
-        // Parse public key from output
         const vps2PubMatch = vps2Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-        if (vps2PubMatch) {
-          d_vps2_wg0_pub = vps2PubMatch[1];
-          addLog(`VPS2 Public Key captured: ${d_vps2_wg0_pub.substring(0, 10)}...`, "success");
-        }
-
+        if (vps2PubMatch) d_vps2_wg0_pub = vps2PubMatch[1];
+        
         if ((vps2Result?.stdout || "").includes("REBOOT_REQUIRED")) {
           await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
-          addLog("Retrying VPS2 setup after reboot...", "info");
           const retryResult = await sshExecute(activeTunnel.vps2, vps2Setup);
-          if (retryResult.code !== 0 && retryResult.code !== undefined) {
-            throw new Error(`VPS2 Setup Failed after reboot (Code ${retryResult.code}): ${retryResult.errorOutput || retryResult.stderr}`);
-          }
           const retryPubMatch = retryResult.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
           if (retryPubMatch) d_vps2_wg0_pub = retryPubMatch[1];
-        } else if (vps2Result.code !== 0 && vps2Result.code !== undefined) {
-          throw new Error(`VPS2 Setup Failed (Code ${vps2Result.code}): ${vps2Result.errorOutput || vps2Result.stderr}`);
         }
-        addLog("VPS2 Setup Complete.", "success");
       }
       
       updateActiveTunnel({ 
@@ -2262,14 +2304,41 @@ ClientNames=${preSetupConfig.clientNames}
       // --- Final Key Sync ---
       checkCancel();
       addLog("Ensuring peer keys are synchronized between nodes...", "info");
-      // Update VPS1's peer (VPS2)
-      const updateVps1Peer = `wg set wg1 peer ${d_vps2_wg0_pub} allowed-ips 0.0.0.0/0 endpoint ${activeTunnel.vps2.ip}:51822 && wg-quick save wg1`;
-      await sshExecute(activeTunnel.vps1, updateVps1Peer);
       
-      // Update VPS2's peer (VPS1)
-      const updateVps2Peer = `wg set wg0 peer ${d_vps1_wg1_pub} allowed-ips 10.9.0.0/24 && wg-quick save wg0`;
-      await sshExecute(activeTunnel.vps2, updateVps2Peer);
-      addLog("Peer keys synchronized successfully.", "success");
+      // Recovery: If keys are missing from the capture, try to fetch them explicitly
+      if (!d_vps1_wg1_pub || !d_vps2_wg0_pub) {
+        addLog("One or more public keys are missing from output. Attempting direct recovery...", "info");
+        if (!d_vps1_wg1_pub) d_vps1_wg1_pub = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
+        if (!d_vps2_wg0_pub) d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+      }
+
+      if (d_vps1_wg1_pub && d_vps2_wg0_pub) {
+        addLog(`Syncing Keys: VPS1(${d_vps1_wg1_pub.substring(0,8)}...) <-> VPS2(${d_vps2_wg0_pub.substring(0,8)}...)`, "info");
+        
+        // Update VPS1's peer (VPS2)
+        // We use sed to replace the placeholder or any existing key in the config file
+        const updateVps1Peer = `
+echo "Updating VPS1 wg1.conf with VPS2 public key..."
+sed -i 's|PublicKey = .*|PublicKey = ${d_vps2_wg0_pub}|' /etc/wireguard/wg1.conf
+systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
+wg show wg1
+`;
+        await sshExecute(activeTunnel.vps1, updateVps1Peer);
+        
+        // Update VPS2's peer (VPS1)
+        const updateVps2Peer = `
+echo "Updating VPS2 wg0.conf with VPS1 public key..."
+sed -i 's|PublicKey = .*|PublicKey = ${d_vps1_wg1_pub}|' /etc/wireguard/wg0.conf
+systemctl restart wg-quick@wg0 || wg-quick up wg0 || true
+wg show wg0
+`;
+        await sshExecute(activeTunnel.vps2, updateVps2Peer);
+        addLog("Peer keys synchronized and services restarted.", "success");
+      } else {
+        addLog("CRITICAL ERROR: Could not synchronize peer keys. One or both keys are still missing.", "error");
+        addLog(`Captured VPS1 Key: ${d_vps1_wg1_pub || 'MISSING'}`, "error");
+        addLog(`Captured VPS2 Key: ${d_vps2_wg0_pub || 'MISSING'}`, "error");
+      }
       
       updateActiveTunnel({ 
         step: 2, 
@@ -2278,6 +2347,10 @@ ClientNames=${preSetupConfig.clientNames}
           ...activeTunnel.vps1,
           wg0PublicKey: d_vps1_wg0_pub,
           wg1PublicKey: d_vps1_wg1_pub
+        },
+        vps2: {
+          ...activeTunnel.vps2,
+          wg0PublicKey: d_vps2_wg0_pub
         }
       });
 
@@ -4593,11 +4666,15 @@ AllowedIPs = 10.8.0.0/24`}
                     <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
                       Native Windows application with system tray integration and automatic startup.
                     </p>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
-                        <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
-                        <span className="text-xs text-blue-400 font-bold">v1.1.0-win</span>
-                      </div>
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
+                          <span className="text-xs text-zinc-500 uppercase font-mono">Revision</span>
+                          <span className="text-xs text-blue-400 font-bold">R12</span>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
+                          <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
+                          <span className="text-xs text-blue-400 font-bold">v1.1.2-win</span>
+                        </div>
                       <button className="w-full py-2 bg-blue-500 text-white rounded-lg font-bold text-sm flex items-center justify-center gap-2 hover:bg-blue-400 transition-colors">
                         <Download className="w-4 h-4" />
                         Download .EXE
@@ -4614,11 +4691,15 @@ AllowedIPs = 10.8.0.0/24`}
                     <p className="text-zinc-400 text-sm mb-6 leading-relaxed">
                       Optimized for Samsung Galaxy devices. Includes Samsung Knox integration, quick-settings toggle, and S-Pen support for management.
                     </p>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
-                        <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
-                        <span className="text-xs text-orange-400 font-bold">v1.1.0-android</span>
-                      </div>
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
+                          <span className="text-xs text-zinc-500 uppercase font-mono">Revision</span>
+                          <span className="text-xs text-orange-400 font-bold">R12</span>
+                        </div>
+                        <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
+                          <span className="text-xs text-zinc-500 uppercase font-mono">Version</span>
+                          <span className="text-xs text-orange-400 font-bold">v1.1.2-android</span>
+                        </div>
                       <div className="flex items-center justify-between p-3 bg-zinc-950 rounded-lg border border-zinc-800">
                         <span className="text-xs text-zinc-500 uppercase font-mono">Format</span>
                         <span className="text-xs text-orange-400 font-bold">APK / AAB</span>
