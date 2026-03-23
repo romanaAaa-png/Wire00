@@ -108,7 +108,7 @@ interface Tunnel {
   vps2: VPSConfig;
   status: 'idle' | 'deploying' | 'deployed' | 'failed';
   step: number;
-  logs: { msg: string, type: 'info' | 'success' | 'error' | 'cmd', vps?: 'vps1' | 'vps2' | 'exchange' }[];
+  logs: { msg: string, type: 'info' | 'success' | 'error' | 'cmd', vps?: 'vps1' | 'vps2' | 'exchange', timestamp: string }[];
   peers: Peer[];
   createdAt: string;
 }
@@ -400,7 +400,7 @@ export default function App() {
       setConsoleLogs(prev => [...prev.slice(-99), {
         type,
         message,
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: new Date().toLocaleTimeString([], { hour12: false })
       }]);
     };
 
@@ -1596,7 +1596,8 @@ ClientNames=${preSetupConfig.clientNames}
   };
 
   const addLog = (msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info', vps?: 'vps1' | 'vps2' | 'exchange') => {
-    setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type, vps }] } : t));
+    const timestamp = new Date().toLocaleTimeString([], { hour12: false });
+    setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type, vps, timestamp }] } : t));
   };
 
   const sshExecute = async (vps: VPSConfig, command: string) => {
@@ -1765,7 +1766,7 @@ ClientNames=${preSetupConfig.clientNames}
     setIsDeploying(true);
     cancelDeploymentRef.current = false;
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
-    addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info");
+    addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info", "exchange");
 
     // Use a local object to track state during deployment to avoid closure issues
     let currentTunnel = { ...activeTunnel };
@@ -1780,7 +1781,7 @@ ClientNames=${preSetupConfig.clientNames}
 
       // --- Pre-Deployment Connection Verification ---
       checkCancel();
-      addLog("Phase 0: Pre-Deployment Connection Verification...", "info");
+      addLog("Phase 0: Pre-Deployment Connection Verification...", "info", "exchange");
       
       updateActiveTunnel({ 
         vps1: { ...currentTunnel.vps1, connectionStatus: 'testing' },
@@ -1807,10 +1808,10 @@ ClientNames=${preSetupConfig.clientNames}
       updateActiveTunnel({ vps2: { ...currentTunnel.vps2, connectionStatus: 'success' } });
       addLog("VPS2 Connection Verified!", "success", "vps2");
 
-      addLog("All connections verified. Proceeding with deployment.", "success");
+      addLog("All connections verified. Proceeding with deployment.", "success", "exchange");
 
       if (isCleanInstall) {
-        addLog("Initiating FULL SYSTEM RESET: Purging all previous versions...", "info");
+        addLog("Initiating FULL SYSTEM RESET: Purging all previous versions...", "info", "exchange");
         
         const resetScript = INITIAL_SCRIPTS.find(s => s.id === 'full-wipe')?.content || '';
         
@@ -1822,11 +1823,11 @@ ClientNames=${preSetupConfig.clientNames}
         const res2 = await sshExecute(currentTunnel.vps2, resetScript);
         if (res2.code !== 0 && res2.code !== undefined) throw new Error(`VPS2 Reset Failed: ${res2.stderr || res2.errorOutput}`);
         
-        addLog("Full System Reset Complete.", "success");
+        addLog("Full System Reset Complete.", "success", "exchange");
       }
 
       // --- Port Verification Phase ---
-      addLog("Starting Port Verification Phase...", "info");
+      addLog("Starting Port Verification Phase...", "info", "exchange");
 
       const checkPorts = async (vpsName: string, vpsKey: 'vps1' | 'vps2') => {
         addLog(`Verifying ports on ${vpsName} (${currentTunnel[vpsKey].ip})...`, "info", vpsKey);
@@ -1885,17 +1886,17 @@ ClientNames=${preSetupConfig.clientNames}
       await checkPorts("VPS2 (Exit Node)", "vps2");
       await checkPorts("VPS1 (Gateway)", "vps1");
 
-      addLog("Port Verification Complete. Proceeding with deployment...", "success");
+      addLog("Port Verification Complete. Proceeding with deployment...", "success", "exchange");
 
       // --- Key Generation Phase ---
-      addLog("Preparing WireGuard keys...", "info");
+      addLog("Preparing WireGuard keys...", "info", "exchange");
       
       let d_vps1_wg0_pub = "";
       let d_vps1_wg1_pub = "";
       let d_vps2_wg0_pub = "";
 
       // --- VPS Preparation Phase ---
-      addLog("Phase 1: System Preparation (Docker & Dependencies)...", "info");
+      addLog("Phase 1: System Preparation (Docker & Dependencies)...", "info", "exchange");
       let vps2SetupRaw = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
       let vps1SetupRaw = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content || '';
 
@@ -2014,7 +2015,7 @@ ClientNames=${preSetupConfig.clientNames}
         vps2: { ...currentTunnel.vps2 }
       });
 
-      addLog("Final system verification...", "info");
+      addLog("Final system verification...", "info", "exchange");
       
       addLog("Verifying VPS1 tunnel interface (wg1)...", "cmd", "vps1");
       const wg1Check = await sshExecute(currentTunnel.vps1, "wg show wg1");
@@ -2030,7 +2031,7 @@ ClientNames=${preSetupConfig.clientNames}
         addLog("Tunnel connectivity verified!", "success", "vps1");
       } else {
         addLog("CRITICAL ERROR: Tunnel connectivity failed. VPS2 is not reachable via 10.9.0.254", "error", "vps1");
-        addLog("Aborting post-deployment sync to prevent system hang.", "error");
+        addLog("Aborting post-deployment sync to prevent system hang.", "error", "exchange");
         setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, status: 'failed' } : t));
         return;
       }
@@ -2043,7 +2044,7 @@ ClientNames=${preSetupConfig.clientNames}
         addLog("IP Forwarding is DISABLED.", "error", "vps1");
       }
 
-      addLog("Double VPN Deployment Successful!", "success");
+      addLog("Double VPN Deployment Successful!", "success", "exchange");
 
       // --- Post-Deployment Key Update Phase ---
       addLog("Initiating Post-Deployment Key Update & Sync...", "info", "exchange");
@@ -2089,10 +2090,10 @@ ClientNames=${preSetupConfig.clientNames}
       }
 
     } catch (error: any) {
-      addLog(`DEPLOYMENT FAILED: ${error.message}`, "error");
+      addLog(`DEPLOYMENT FAILED: ${error.message}`, "error", "exchange");
       updateActiveTunnel({ status: 'failed' });
       
-      addLog("Initiating Automated Rollback...", "info");
+      addLog("Initiating Automated Rollback...", "info", "exchange");
       const vps1Rollback = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.rollbackContent || '';
       const vps2Rollback = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.rollbackContent || '';
       
@@ -4164,7 +4165,7 @@ PersistentKeepalive = 25`;
                                   log.type === 'success' ? "text-emerald-400" : 
                                   log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
                                 )}>
-                                  <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
+                                  <span className="text-zinc-700 shrink-0">[{log.timestamp}]</span>
                                   <span className="break-all">
                                     {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
                                     {log.msg}
@@ -4193,7 +4194,7 @@ PersistentKeepalive = 25`;
                                   log.type === 'success' ? "text-emerald-400" : 
                                   log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
                                 )}>
-                                  <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
+                                  <span className="text-zinc-700 shrink-0">[{log.timestamp}]</span>
                                   <span className="break-all">
                                     {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
                                     {log.msg}
@@ -4222,7 +4223,7 @@ PersistentKeepalive = 25`;
                                   log.type === 'success' ? "text-emerald-400" : 
                                   log.type === 'cmd' ? "text-zinc-300" : "text-zinc-500"
                                 )}>
-                                  <span className="text-zinc-700 shrink-0">[{new Date().toLocaleTimeString([], { hour12: false })}]</span>
+                                  <span className="text-zinc-700 shrink-0">[{log.timestamp}]</span>
                                   <span className="break-all">
                                     {log.type === 'cmd' && <span className="text-emerald-500 mr-2">$</span>}
                                     {log.msg}
