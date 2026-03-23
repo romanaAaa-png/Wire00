@@ -482,7 +482,8 @@ sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
 systemctl restart wg-quick@wg1
 
 # 6. Log Rotation
-echo "Key rotation completed at $(date)" >> /var/log/lodgeguard-sync.log
+mkdir -p /root/DTLogs
+echo "Key rotation completed at $(date)" >> /root/DTLogs/lodgeguard-sync.txt
 `
     },
     {
@@ -495,8 +496,8 @@ echo "Key rotation completed at $(date)" >> /var/log/lodgeguard-sync.log
 set -e
 
 # Logging setup
-LOG_DIR="/root/DTLog"
-LOG_FILE="$LOG_DIR/installation.log"
+LOG_DIR="/root/DTLogs"
+LOG_FILE="$LOG_DIR/installation.txt"
 mkdir -p "$LOG_DIR"
 echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
 echo "Started at: $(date)" >> "$LOG_FILE"
@@ -508,20 +509,20 @@ log_step() {
 
 collect_debug_info() {
   log_step "Collecting system debug information..."
-  journalctl -n 200 > "$LOG_DIR/system_journal.log"
-  journalctl -xeu docker.service > "$LOG_DIR/docker_journal.log" || true
-  dmesg | tail -n 100 > "$LOG_DIR/dmesg.log"
-  iptables -S > "$LOG_DIR/iptables_filter.log"
-  iptables -t nat -S > "$LOG_DIR/iptables_nat.log"
-  ip addr > "$LOG_DIR/ip_addr.log"
-  ip route > "$LOG_DIR/ip_route.log"
+  journalctl -n 200 > "$LOG_DIR/system_journal.txt"
+  journalctl -xeu docker.service > "$LOG_DIR/docker_journal.txt" || true
+  dmesg | tail -n 100 > "$LOG_DIR/dmesg.txt"
+  iptables -S > "$LOG_DIR/iptables_filter.txt"
+  iptables -t nat -S > "$LOG_DIR/iptables_nat.txt"
+  ip addr > "$LOG_DIR/ip_addr.txt"
+  ip route > "$LOG_DIR/ip_route.txt"
   if command -v wg &> /dev/null; then
-    wg show > "$LOG_DIR/wireguard_status.log"
+    wg show > "$LOG_DIR/wireguard_status.txt"
   fi
   if command -v docker &> /dev/null; then
-    docker ps -a > "$LOG_DIR/docker_containers.log"
-    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.log" || true
-    docker info > "$LOG_DIR/docker_info.log" || true
+    docker ps -a > "$LOG_DIR/docker_containers.txt"
+    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.txt" || true
+    docker info > "$LOG_DIR/docker_info.txt" || true
   fi
   log_step "Debug information collected in $LOG_DIR"
 }
@@ -701,6 +702,7 @@ fi
 
 # 4. Setup VPS-to-VPS Tunnel (wg1)
 log_step "Configuring VPS-to-VPS Tunnel (wg1)..."
+mkdir -p /etc/wireguard
 
 # Generate or use existing keys
 if [ -f /etc/wireguard/wg1.key ]; then
@@ -731,7 +733,6 @@ if [ -z "$PRIMARY_IP" ]; then
   exit 1
 fi
 
-mkdir -p /etc/wireguard
 cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
 PrivateKey = $PRIV_KEY
@@ -842,8 +843,8 @@ echo "--- VPS1 Rollback Complete ---"
 set -e
 
 # Logging setup
-LOG_DIR="/root/DTLog"
-LOG_FILE="$LOG_DIR/installation.log"
+LOG_DIR="/root/DTLogs"
+LOG_FILE="$LOG_DIR/installation.txt"
 mkdir -p "$LOG_DIR"
 echo "--- Double Tunnel Installation Log ---" > "$LOG_FILE"
 echo "Started at: $(date)" >> "$LOG_FILE"
@@ -855,18 +856,18 @@ log_step() {
 
 collect_debug_info() {
   log_step "Collecting system debug information..."
-  journalctl -n 200 > "$LOG_DIR/system_journal.log"
-  dmesg | tail -n 100 > "$LOG_DIR/dmesg.log"
-  iptables -S > "$LOG_DIR/iptables_filter.log"
-  iptables -t nat -S > "$LOG_DIR/iptables_nat.log"
-  ip addr > "$LOG_DIR/ip_addr.log"
-  ip route > "$LOG_DIR/ip_route.log"
+  journalctl -n 200 > "$LOG_DIR/system_journal.txt"
+  dmesg | tail -n 100 > "$LOG_DIR/dmesg.txt"
+  iptables -S > "$LOG_DIR/iptables_filter.txt"
+  iptables -t nat -S > "$LOG_DIR/iptables_nat.txt"
+  ip addr > "$LOG_DIR/ip_addr.txt"
+  ip route > "$LOG_DIR/ip_route.txt"
   if command -v wg &> /dev/null; then
-    wg show > "$LOG_DIR/wireguard_status.log"
+    wg show > "$LOG_DIR/wireguard_status.txt"
   fi
   if command -v docker &> /dev/null; then
-    docker ps -a > "$LOG_DIR/docker_containers.log"
-    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.log" || true
+    docker ps -a > "$LOG_DIR/docker_containers.txt"
+    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.txt" || true
   fi
   log_step "Debug information collected in $LOG_DIR"
 }
@@ -1037,8 +1038,8 @@ echo "--- VPS2 Rollback Complete ---"
       content: `#!/bin/bash
 # Double Tunnel - VPS Readiness Check Script
 # Logging setup
-LOG_DIR="/root/DTLog"
-LOG_FILE="$LOG_DIR/installation.log"
+LOG_DIR="/root/DTLogs"
+LOG_FILE="$LOG_DIR/installation.txt"
 mkdir -p "$LOG_DIR"
 echo "--- Double Tunnel: System Readiness Check ---" >> "$LOG_FILE"
 echo "Checking at: $(date)" >> "$LOG_FILE"
@@ -1126,8 +1127,8 @@ fi
       content: `#!/bin/bash
 # Double Tunnel - Full VPS Reset Script
 # Logging setup
-LOG_DIR="/root/DTLog"
-LOG_FILE="$LOG_DIR/installation.log"
+LOG_DIR="/root/DTLogs"
+LOG_FILE="$LOG_DIR/installation.txt"
 mkdir -p "$LOG_DIR"
 echo "--- WARNING: Initiating Full System Wipe ---" >> "$LOG_FILE"
 echo "Started at: $(date)" >> "$LOG_FILE"
