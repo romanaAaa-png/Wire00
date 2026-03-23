@@ -464,6 +464,9 @@ export default function App() {
 # This script runs on VPS1 (Gateway) and communicates with VPS2 (Node)
 set -e
 
+# Target IP for key exchange (defaults to internal tunnel IP)
+PEER_IP="\${1:-10.9.0.254}"
+
 # 1. Ensure SSH Key exists for communication
 if [ ! -f /root/.ssh/id_rsa ]; then
     echo "Generating SSH key for VPS1 -> VPS2 communication..."
@@ -472,29 +475,27 @@ fi
 
 # 2. Generate New Ephemeral Keys
 echo "Generating new ephemeral WireGuard keys for rotation..."
-NEW_PRIV=$(wg genkey)
-NEW_PUB=$(echo "$NEW_PRIV" | wg pubkey)
+NEW_PRIV=\$(wg genkey)
+NEW_PUB=\$(echo "\$NEW_PRIV" | wg pubkey)
 
 # 3. Exchange Keys with VPS2
-# We use the existing secure tunnel (10.9.0.254) to push the new public key
-echo "Exchanging keys: Sending new VPS1 public key to VPS2 via secure tunnel (10.9.0.254)..."
+echo "Exchanging keys: Sending new VPS1 public key to VPS2 via \$PEER_IP..."
 
-# Check if VPS2 is reachable via the tunnel first
-if ! ping -c 1 -W 5 10.9.0.254 > /dev/null; then
-    echo "ERROR: VPS2 (10.9.0.254) is not reachable via the tunnel. Aborting key exchange."
+# Check if VPS2 is reachable
+if ! ping -c 1 -W 5 "\$PEER_IP" > /dev/null; then
+    echo "ERROR: VPS2 (\$PEER_IP) is not reachable. Aborting key exchange."
     exit 1
 fi
 
-# Note: The app should have added VPS1's public key to VPS2's authorized_keys during setup
-# Using ConnectTimeout and BatchMode to prevent hanging on connection issues or password prompts
-if ! ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"; then
+# Push the new public key to VPS2
+if ! ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@"\$PEER_IP" "echo '\$NEW_PUB' > /etc/wireguard/vps1_new_pub"; then
     echo "ERROR: Failed to send public key to VPS2 via SSH. Check if SSH keys are authorized."
     exit 1
 fi
 
 # 4. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
 echo "Recording new private key into /etc/wireguard/wg1.conf..."
-sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
+sed -i "s|PrivateKey = .*|PrivateKey = \$NEW_PRIV|" /etc/wireguard/wg1.conf
 
 # 5. Reload WireGuard
 echo "Restarting wg-quick@wg1 to apply new keys..."
@@ -513,7 +514,7 @@ echo "Key rotation and exchange successful!"
 
 # 7. Log Rotation
 mkdir -p /root/DTLogs
-echo "Key rotation completed at $(date)" >> /root/DTLogs/lodgeguard-sync.txt
+echo "Key rotation completed at \$(date) via \$PEER_IP" >> /root/DTLogs/lodgeguard-sync.txt
 `
     },
     {
@@ -656,6 +657,7 @@ ListenPort = __WG_INTER_VPS_PORT__
 MTU = 1280
 Table = off
 
+PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 || true
 PostUp = ip rule add from 10.9.0.1 table 200 || true
@@ -663,6 +665,7 @@ PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
 PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
 
+PreDown = ip route del 10.9.0.0/24 dev %i || true
 PreDown = ip route del default dev %i table 200 || true
 PreDown = ip rule del from 10.8.0.0/24 table 200 || true
 PreDown = ip rule del from 10.9.0.1 table 200 || true
@@ -2000,8 +2003,8 @@ ClientNames=${preSetupConfig.clientNames}
       }
       
       const syncScript = INITIAL_SCRIPTS.find(s => s.id === 'sync')?.content || '';
-      addLog("Running lodgeguard-sync.sh on VPS1...", "cmd", "vps1");
-      const syncRes = await sshExecute(currentTunnel.vps1, syncScript);
+      addLog(`Running lodgeguard-sync.sh on VPS1 targeting VPS2 Public IP (${currentTunnel.vps2.ip})...`, "cmd", "vps1");
+      const syncRes = await sshExecute(currentTunnel.vps1, `bash -s -- "${currentTunnel.vps2.ip}" << '_EOF_LODGEGUARD_'\n${syncScript}\n_EOF_LODGEGUARD_`);
       if (syncRes.code === 0 || syncRes.code === undefined) {
         addLog("All VPS WireGuard keys have been updated and synchronized.", "success", "vps1");
       } else {
