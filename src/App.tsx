@@ -17,6 +17,7 @@ import {
   Binoculars,
   Globe,
   Lock,
+  Key,
   Cpu,
   Wifi,
   Edit2,
@@ -234,7 +235,7 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'wg-keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [isTestingConfig, setIsTestingConfig] = useState(false);
@@ -727,8 +728,8 @@ systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
 ip link delete wg0 2>/dev/null || true
 ip link delete wg1 2>/dev/null || true
 if command -v docker &> /dev/null; then
-  docker stop wg-easy || true
-  docker rm wg-easy || true
+  docker stop wg-easy 2>/dev/null || true
+  docker rm wg-easy 2>/dev/null || true
 fi
 rm -rf /etc/wireguard /opt/wg-easy /etc/docker/containers/wg-easy || true
 
@@ -2256,8 +2257,21 @@ ClientNames=${preSetupConfig.clientNames}
         vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', placeholderKey);
         
         const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
+        
+        // Robust key extraction from stdout
         const vps2PubMatch = vps2Result.stdout.match(/RESULT_WG0_PUB_KEY: ([a-zA-Z0-9+/=]+)/);
-        if (vps2PubMatch) d_vps2_wg0_pub = vps2PubMatch[1];
+        if (vps2PubMatch) {
+          d_vps2_wg0_pub = vps2PubMatch[1];
+        } else {
+          // Fallback: Try to get it manually if the echo failed
+          addLog("VPS2 setup finished but key echo not found. Attempting manual retrieval...", "info");
+          d_vps2_wg0_pub = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+        }
+        
+        if (!d_vps2_wg0_pub) {
+          addLog("CRITICAL ERROR: Could not retrieve VPS2 Public Key. Deployment cannot continue.", "error");
+          throw new Error("VPS2 Public Key Retrieval Failed");
+        }
         
         if ((vps2Result?.stdout || "").includes("REBOOT_REQUIRED")) {
           await rebootVpsAndWait(activeTunnel.vps2, "VPS2 (Exit Node)");
@@ -2835,6 +2849,7 @@ PersistentKeepalive = 25`;
             { id: 'port-forwarding', icon: ArrowRightLeft, label: 'Port Forwarding' },
             { id: 'scripts', icon: FileCode, label: 'Automation Scripts' },
             { id: 'keys', icon: Lock, label: 'SSH Key Manager' },
+            { id: 'wg-keys', icon: Key, label: 'WireGuard Keys' },
             { id: 'deploy', icon: Play, label: 'Deployment Manager' },
             { id: 'terminal', icon: Terminal, label: 'Integrated Terminal' },
             { id: 'config', icon: Settings, label: 'Server Config' },
@@ -3766,6 +3781,130 @@ PersistentKeepalive = 25`;
                       </div>
                     </div>
                   ))}
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === 'wg-keys' && (
+              <motion.div
+                key="wg-keys"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="space-y-8"
+              >
+                <div className="flex items-center justify-between mb-8">
+                  <div>
+                    <h2 className="text-2xl font-bold text-zinc-100 tracking-tight">WireGuard Key Manager</h2>
+                    <p className="text-sm text-zinc-500">View and copy public keys for your VPS nodes to manually resolve configuration issues.</p>
+                  </div>
+                  <button 
+                    onClick={async () => {
+                      addLog("Refreshing WireGuard keys from servers...", "info");
+                      const pub1 = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
+                      const pub1wg0 = await getVpsPublicKey(activeTunnel.vps1, 'wg0');
+                      const pub2 = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+                      updateActiveTunnel({
+                        vps1: { ...activeTunnel.vps1, wg1PublicKey: pub1, wg0PublicKey: pub1wg0 },
+                        vps2: { ...activeTunnel.vps2, wg0PublicKey: pub2 }
+                      });
+                      addLog("Keys refreshed successfully.", "success");
+                    }}
+                    className="flex items-center gap-2 px-6 py-3 bg-zinc-900 border border-zinc-800 text-zinc-100 font-bold rounded-xl hover:bg-zinc-800 transition-all"
+                  >
+                    <RotateCcw className="w-5 h-5" />
+                    <span>REFRESH FROM SERVERS</span>
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* VPS1 Keys */}
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 space-y-6">
+                    <div className="flex items-center gap-4 mb-2">
+                      <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-500">
+                        <Server className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-zinc-100">VPS1 (Gateway)</h3>
+                        <p className="text-xs text-zinc-500">{activeTunnel.vps1.ip}</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG1 Public Key (Tunnel to VPS2)</label>
+                          <button 
+                            onClick={() => handleCopy(activeTunnel.vps1.wg1PublicKey || '', 'vps1-wg1-pub')}
+                            className="text-zinc-500 hover:text-emerald-500 transition-colors"
+                          >
+                            {copied === 'vps1-wg1-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          </button>
+                        </div>
+                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all">
+                          {activeTunnel.vps1.wg1PublicKey || 'Not Deployed'}
+                        </div>
+                      </div>
+
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG0 Public Key (Client Gateway)</label>
+                          <button 
+                            onClick={() => handleCopy(activeTunnel.vps1.wg0PublicKey || '', 'vps1-wg0-pub')}
+                            className="text-zinc-500 hover:text-emerald-500 transition-colors"
+                          >
+                            {copied === 'vps1-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          </button>
+                        </div>
+                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all">
+                          {activeTunnel.vps1.wg0PublicKey || 'Not Deployed'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* VPS2 Keys */}
+                  <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 space-y-6">
+                    <div className="flex items-center gap-4 mb-2">
+                      <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-500">
+                        <Server className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-lg font-bold text-zinc-100">VPS2 (Exit Node)</h3>
+                        <p className="text-xs text-zinc-500">{activeTunnel.vps2.ip}</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between">
+                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG0 Public Key (Tunnel from VPS1)</label>
+                          <button 
+                            onClick={() => handleCopy(activeTunnel.vps2.wg0PublicKey || '', 'vps2-wg0-pub')}
+                            className="text-zinc-500 hover:text-emerald-500 transition-colors"
+                          >
+                            {copied === 'vps2-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          </button>
+                        </div>
+                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all">
+                          {activeTunnel.vps2.wg0PublicKey || 'Not Deployed'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-6 bg-emerald-500/5 border border-emerald-500/20 rounded-2xl">
+                  <div className="flex gap-4">
+                    <AlertCircle className="w-6 h-6 text-emerald-500 shrink-0" />
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-bold text-emerald-500 uppercase tracking-wider">How to use these keys</h4>
+                      <p className="text-xs text-zinc-400 leading-relaxed">
+                        If the automated deployment fails with a "Configuration parsing error" or "Line unrecognized", it usually means one node couldn't retrieve the other's public key. 
+                        You can copy the <strong>VPS2 WG0 Public Key</strong> and manually paste it into the <code>[Peer]</code> section of <code>/etc/wireguard/wg1.conf</code> on <strong>VPS1</strong>.
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </motion.div>
             )}
