@@ -463,7 +463,7 @@ export default function App() {
       content: `#!/bin/bash
 # LodgeGuard Automatic Key Rotation & Exchange Script
 # This script runs on VPS1 (Gateway) and communicates with VPS2 (Node)
-set -e
+set -ex
 
 # Target IP for key exchange (defaults to internal tunnel IP)
 PEER_IP="\${1:-10.9.0.254}"
@@ -525,7 +525,7 @@ echo "Key rotation completed at \$(date) via \$PEER_IP" >> /root/DTLogs/lodgegua
       icon: Binoculars,
       content: `#!/bin/bash
 # VPS1 Setup Script (Gateway) - IP: __VPS1_IP__
-set -e
+set -ex
 
 # Logging setup
 LOG_DIR="/root/DTLogs"
@@ -720,7 +720,7 @@ rm -rf /opt/wg-easy /etc/wireguard/wg1.*
       icon: Binoculars,
       content: `#!/bin/bash
 # VPS2 Setup Script (Exit Node) - IP: __VPS2_IP__
-set -e
+set -ex
 
 # Logging setup
 LOG_DIR="/root/DTLogs"
@@ -1964,7 +1964,7 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Phase 2.1: Inter-VPS SSH Handshake (VPS1 -> VPS2)...", "info", "exchange");
       addLog(`VPS1 attempting temporary SSH connection to VPS2 (${currentTunnel.vps2.ip}) for key validation...`, "cmd", "vps1");
       
-      const handshakeCmd = `sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${currentTunnel.vps2.ip} "echo 'HANDSHAKE_OK: VPS1 successfully reached VPS2 via SSH'"`;
+      const handshakeCmd = `sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 root@${currentTunnel.vps2.ip} "echo 'HANDSHAKE_OK: VPS1 successfully reached VPS2 via SSH'"`;
       const handshakeRes = await sshExecute(currentTunnel.vps1, handshakeCmd);
       
       if (handshakeRes.code === 0 && handshakeRes.stdout.includes("HANDSHAKE_OK")) {
@@ -2066,8 +2066,8 @@ ClientNames=${preSetupConfig.clientNames}
         await sshExecute(currentTunnel.vps2, `mkdir -p /root/.ssh && echo "${vps1PubKey}" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys`);
         
         // Verify SSH access from VPS1 to VPS2
-        addLog("Verifying SSH access from VPS1 to VPS2...", "cmd", "exchange");
-        const sshVerifyCmd = `ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no root@10.9.0.254 "echo 'SSH_OK'"`;
+        addLog("Verifying SSH access from VPS1 to VPS2 via Public IP...", "cmd", "exchange");
+        const sshVerifyCmd = `ssh -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip} "echo 'SSH_OK'"`;
         const sshVerifyRes = await sshExecute(currentTunnel.vps1, sshVerifyCmd);
         if (sshVerifyRes.stdout.includes("SSH_OK")) {
           addLog("SSH access from VPS1 to VPS2 verified!", "success", "exchange");
