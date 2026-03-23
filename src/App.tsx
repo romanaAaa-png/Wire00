@@ -469,16 +469,18 @@ if [ ! -f /root/.ssh/id_rsa ]; then
 fi
 
 # 2. Generate New Ephemeral Keys
+echo "Generating new ephemeral WireGuard keys for rotation..."
 NEW_PRIV=$(wg genkey)
 NEW_PUB=$(echo "$NEW_PRIV" | wg pubkey)
 
 # 3. Exchange Keys with VPS2
 # We use the existing secure tunnel (10.9.0.254) to push the new public key
-echo "Sending new public key to VPS2..."
+echo "Exchanging keys: Sending new VPS1 public key to VPS2 via secure tunnel (10.9.0.254)..."
 # Note: The app should have added VPS1's public key to VPS2's authorized_keys during setup
 ssh -o StrictHostKeyChecking=no root@10.9.0.254 "echo '$NEW_PUB' > /etc/wireguard/vps1_new_pub"
 
 # 4. Update VPS1 Configuration (wg1 is the VPS-to-VPS tunnel)
+echo "Recording new private key into /etc/wireguard/wg1.conf..."
 sed -i "s|PrivateKey = .*|PrivateKey = $NEW_PRIV|" /etc/wireguard/wg1.conf
 
 # 5. Reload WireGuard
@@ -698,11 +700,11 @@ fi
 log_step "Configuring WG-Easy in /etc/docker/containers/wg-easy..."
 mkdir -p /etc/docker/containers/wg-easy
 
-cat <<EOF > /etc/docker/containers/wg-easy/docker-compose.yml
+cat <<'EOF' > /etc/docker/containers/wg-easy/docker-compose.yml
 services:
   wg-easy:
     environment:
-      - WG_HOST=\${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
+      - WG_HOST=${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
       - WG_MTU=1280
       - PASSWORD=admin123
       - WG_DEFAULT_DNS=1.1.1.1
@@ -762,16 +764,20 @@ if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
 fi
 
 # Generate or use existing keys
+log_step "Generating or retrieving WireGuard keys for VPS1..."
 if [ -f /etc/wireguard/wg1.key ]; then
-  log_step "Using existing wg1 keys..."
+  log_step "Retrieving existing wg1 keys from /etc/wireguard/wg1.key..."
   PRIV_KEY=$(cat /etc/wireguard/wg1.key)
 else
-  log_step "Generating new wg1 keys..."
+  log_step "Generating new wg1 keys for the gateway tunnel..."
   PRIV_KEY=$(wg genkey)
   echo "$PRIV_KEY" > /etc/wireguard/wg1.key
 fi
 PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
 echo "$PUB_KEY" > /etc/wireguard/wg1.pub
+
+log_step "Recording VPS1 configuration into /etc/wireguard/wg1.conf..."
+log_step "Exchanging keys: Recording VPS2's public key (__VPS2_WG0_PUB_KEY__) as the exit node peer."
 
 # Detect primary interface and IP to ensure management traffic bypasses the tunnel
 PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1)
@@ -1064,15 +1070,18 @@ ip link delete wg0 2>/dev/null || true
 
 # Generate or use existing keys
 if [ -f /etc/wireguard/wg0.key ]; then
-  log_step "Using existing wg0 keys..."
+  log_step "Retrieving existing wg0 keys from /etc/wireguard/wg0.key..."
   PRIV_KEY=$(cat /etc/wireguard/wg0.key)
 else
-  log_step "Generating new wg0 keys..."
+  log_step "Generating new wg0 keys for the exit node..."
   PRIV_KEY=$(wg genkey)
   echo "$PRIV_KEY" > /etc/wireguard/wg0.key
 fi
 PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
 echo "$PUB_KEY" > /etc/wireguard/wg0.pub
+
+log_step "Recording VPS2 configuration into /etc/wireguard/wg0.conf..."
+log_step "Exchanging keys: Recording VPS1's public key (__VPS1_WG1_PUB_KEY__) as the gateway peer."
 
 cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
@@ -2306,13 +2315,15 @@ ClientNames=${preSetupConfig.clientNames}
       }
 
       if (d_vps1_wg1_pub && d_vps2_wg0_pub) {
-        addLog(`Syncing Keys: VPS1(${d_vps1_wg1_pub.substring(0,8)}...) <-> VPS2(${d_vps2_wg0_pub.substring(0,8)}...)`, "info");
+        addLog(`Final Key Exchange: Syncing VPS1 Gateway (${d_vps1_wg1_pub.substring(0,8)}...) with VPS2 Exit Node (${d_vps2_wg0_pub.substring(0,8)}...)`, "info");
         
         // Update VPS1's peer (VPS2)
         // We use sed to replace the placeholder or any existing key in the config file
         const updateVps1Peer = `
-echo "Updating VPS1 wg1.conf with VPS2 public key..."
+log_step "Retrieving VPS2 public key for final synchronization..."
+echo "Recording VPS2 public key (${d_vps2_wg0_pub}) into VPS1's wg1.conf..."
 sed -i 's|PublicKey = .*|PublicKey = ${d_vps2_wg0_pub}|' /etc/wireguard/wg1.conf
+log_step "Restarting wg1 to apply the exchanged keys..."
 systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
 wg show wg1
 `;
@@ -2320,13 +2331,15 @@ wg show wg1
         
         // Update VPS2's peer (VPS1)
         const updateVps2Peer = `
-echo "Updating VPS2 wg0.conf with VPS1 public key..."
+log_step "Retrieving VPS1 public key for final synchronization..."
+echo "Recording VPS1 public key (${d_vps1_wg1_pub}) into VPS2's wg0.conf..."
 sed -i 's|PublicKey = .*|PublicKey = ${d_vps1_wg1_pub}|' /etc/wireguard/wg0.conf
+log_step "Restarting wg0 to apply the exchanged keys..."
 systemctl restart wg-quick@wg0 || wg-quick up wg0 || true
 wg show wg0
 `;
         await sshExecute(activeTunnel.vps2, updateVps2Peer);
-        addLog("Peer keys synchronized and services restarted.", "success");
+        addLog("Peer keys successfully retrieved, exchanged, and recorded on both servers.", "success");
       } else {
         addLog("CRITICAL ERROR: Could not synchronize peer keys. One or both keys are still missing.", "error");
         addLog(`Captured VPS1 Key: ${d_vps1_wg1_pub || 'MISSING'}`, "error");
