@@ -636,7 +636,7 @@ fi
 
 # Install with non-interactive flags
 apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  wireguard iptables docker.io docker-compose-v2 || true
+  wireguard iptables docker.io docker-compose-v2 resolvconf || true
 
 log_step "Starting Docker daemon..."
 systemctl unmask docker.service || true
@@ -647,8 +647,8 @@ wait_for_service "docker"
 
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
-systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
-systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
+systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
+systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
 if command -v docker &> /dev/null; then
   docker stop wg-easy || true
   docker rm wg-easy || true
@@ -908,12 +908,12 @@ fi
 
 # Stop and remove previous versions
 log_step "Cleaning up previous installations..."
-systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
-systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx || true
+systemctl stop wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
+systemctl disable wg-quick@wg0 wg-quick@wg1 apache2 nginx 2>/dev/null || true
 rm -rf /etc/wireguard || true
 
 log_step "Installing WireGuard and networking tools..."
-apt-get install -y wireguard iptables curl iproute2 || true
+apt-get install -y wireguard iptables curl iproute2 resolvconf || true
 
 # 2. Enable IP Forwarding
 log_step "Enabling IP Forwarding..."
@@ -1829,9 +1829,8 @@ ClientNames=${preSetupConfig.clientNames}
         addLog(`Connecting to ${activeTunnel.vps2.ip} via SSH...`, "cmd");
         
         let vps2Setup = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content || '';
-        // Note: VPS2 setup doesn't strictly need VPS1's key yet for basic interface up,
-        // but it's better to have it. However, we generate VPS1's key later.
-        // We'll update the peer in the Final Sync phase.
+        // Inject a dummy key if VPS1 key is not yet known (it will be synced later)
+        vps2Setup = vps2Setup.replaceAll('__VPS1_WG1_PUB_KEY__', d_vps1_wg1_pub || 'mP8vW9R/X6l2Y7z4vW9R/X6l2Y7z4vW9R/X6l2Y7z4=');
         
         const vps2Result = await sshExecute(activeTunnel.vps2, vps2Setup);
         
