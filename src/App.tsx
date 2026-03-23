@@ -564,7 +564,16 @@ collect_debug_info() {
 }
 trap collect_debug_info EXIT
 
+# Helper to fix common package manager issues
+fix_apt() {
+  log_step "Fixing package manager (apt)..."
+  rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
+  dpkg --configure -a || true
+  apt-get update || true
+}
+
 log_step "--- Starting VPS1 Double VPN Setup ---"
+fix_apt
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
@@ -658,6 +667,18 @@ if ! lsmod | grep -q wireguard; then
   log_step "WireGuard module not loaded. Installing headers and tools..."
   apt-get install -y linux-headers-$(uname -r) wireguard-tools || true
   modprobe wireguard || true
+fi
+
+if ! lsmod | grep -q wireguard; then
+  log_step "WireGuard module still not loaded. Trying wireguard-dkms..."
+  apt-get install -y wireguard-dkms || true
+  modprobe wireguard || true
+fi
+
+if ! lsmod | grep -q wireguard; then
+  log_step "CRITICAL: WireGuard kernel module could not be loaded. A system reboot is likely required."
+  echo "REBOOT_REQUIRED"
+  # We continue anyway, but it will likely fail later
 fi
 
 log_step "Installing WireGuard and Docker..."
@@ -824,7 +845,14 @@ EOF
 
 log_step "Starting wg1 interface..."
 systemctl enable wg-quick@wg1 || true
-systemctl start wg-quick@wg1 || true
+if ! systemctl start wg-quick@wg1; then
+  log_step "ERROR: wg-quick@wg1 failed to start via systemd. Attempting manual start for diagnostics..."
+  wg-quick up wg1 || true
+  log_step "--- wg1 Status ---"
+  wg show wg1 || true
+  log_step "--- System Logs ---"
+  journalctl -xeu wg-quick@wg1 -n 50 >> "$LOG_FILE" 2>&1 || true
+fi
 wait_for_service "wg-quick@wg1"
 
 # Output keys for the app to capture
@@ -959,7 +987,16 @@ collect_debug_info() {
 }
 trap collect_debug_info EXIT
 
+# Helper to fix common package manager issues
+fix_apt() {
+  log_step "Fixing package manager (apt)..."
+  rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
+  dpkg --configure -a || true
+  apt-get update || true
+}
+
 log_step "--- Starting VPS2 Exit Node Setup ---"
+fix_apt
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
@@ -973,6 +1010,17 @@ if ! lsmod | grep -q wireguard; then
   log_step "WireGuard module not loaded. Installing headers and tools..."
   apt-get install -y linux-headers-$(uname -r) wireguard-tools || true
   modprobe wireguard || true
+fi
+
+if ! lsmod | grep -q wireguard; then
+  log_step "WireGuard module still not loaded. Trying wireguard-dkms..."
+  apt-get install -y wireguard-dkms || true
+  modprobe wireguard || true
+fi
+
+if ! lsmod | grep -q wireguard; then
+  log_step "CRITICAL: WireGuard kernel module could not be loaded. A system reboot is likely required."
+  echo "REBOOT_REQUIRED"
 fi
 
 # Stop and remove previous versions
@@ -1036,7 +1084,14 @@ EOF
 
 log_step "Starting wg0 interface..."
 systemctl enable wg-quick@wg0 || true
-systemctl start wg-quick@wg0 || true
+if ! systemctl start wg-quick@wg0; then
+  log_step "ERROR: wg-quick@wg0 failed to start via systemd. Attempting manual start for diagnostics..."
+  wg-quick up wg0 || true
+  log_step "--- wg0 Status ---"
+  wg show wg0 || true
+  log_step "--- System Logs ---"
+  journalctl -xeu wg-quick@wg0 -n 50 >> "$LOG_FILE" 2>&1 || true
+fi
 # Initial start might fail if keys are placeholders, we'll sync them later
 # wait_for_service "wg-quick@wg0"
 
@@ -1383,6 +1438,79 @@ if systemctl is-active --quiet docker; then
 else
     echo "[ERROR] Docker still failed to start. A system reboot is highly recommended."
 fi
+`
+    },
+    {
+      id: 'vps-check',
+      title: 'VPS Diagnostic Tool (vps-check.sh)',
+      description: 'Comprehensive diagnostic script to check WireGuard, Docker, and network status on any VPS.',
+      icon: Activity,
+      content: `#!/bin/bash
+echo "======================================================"
+echo "   DOUBLE TUNNEL - VPS DIAGNOSTIC REPORT"
+echo "======================================================"
+echo "Timestamp: $(date)"
+echo "Uptime: $(uptime -p)"
+echo "Kernel: $(uname -r)"
+echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d'=' -f2 | tr -d '\"')"
+echo ""
+
+echo "--- 1. WireGuard Status ---"
+if command -v wg &> /dev/null; then
+    echo "[OK] WireGuard Tools installed."
+    wg show || echo "[INFO] No active WireGuard interfaces."
+else
+    echo "[ERROR] WireGuard Tools (wg) NOT found."
+fi
+
+echo ""
+echo "--- 2. Kernel Module Status ---"
+if lsmod | grep -q wireguard; then
+    echo "[OK] WireGuard kernel module is LOADED."
+else
+    echo "[ERROR] WireGuard kernel module is NOT loaded."
+    echo "Attempting to load it now..."
+    modprobe wireguard && echo "[OK] Successfully loaded module." || echo "[ERROR] Failed to load module."
+fi
+
+echo ""
+echo "--- 3. Docker Status ---"
+if command -v docker &> /dev/null; then
+    echo "[OK] Docker is installed."
+    if systemctl is-active --quiet docker; then
+        echo "[OK] Docker service is ACTIVE."
+        docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "[ERROR] Failed to list containers."
+    else
+        echo "[ERROR] Docker service is NOT active."
+        systemctl status docker --no-pager -n 5
+    fi
+else
+    echo "[ERROR] Docker is NOT installed."
+fi
+
+echo ""
+echo "--- 4. Network Configuration ---"
+echo "Interfaces:"
+ip -4 addr show | grep -E '^[0-9]|inet'
+echo ""
+echo "Default Route:"
+ip route | grep default
+echo ""
+echo "IP Forwarding:"
+sysctl net.ipv4.ip_forward
+
+echo ""
+echo "--- 5. Recent System Errors (journalctl) ---"
+journalctl -p 3 -n 20 --no-pager
+
+echo ""
+echo "--- 6. WireGuard Configs ---"
+ls -l /etc/wireguard/*.conf 2>/dev/null || echo "No WireGuard configs found in /etc/wireguard/"
+
+echo ""
+echo "======================================================"
+echo "   DIAGNOSTIC COMPLETE"
+echo "======================================================"
 `
     },
     {
