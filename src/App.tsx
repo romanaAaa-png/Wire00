@@ -28,6 +28,7 @@ import {
   AlertCircle,
   AlertTriangle,
   ShieldAlert,
+  ShieldCheck,
   Database,
   ChevronRight,
   ChevronLeft,
@@ -236,6 +237,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
+  const [isTestingConfig, setIsTestingConfig] = useState(false);
   const cancelDeploymentRef = useRef(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   
@@ -1125,6 +1127,84 @@ if [ "$ID" == "ubuntu" ] || [ "$ID" == "debian" ]; then
 else
   log_msg "System may require manual adjustments for non-Debian distributions."
 fi
+`
+    },
+    {
+      id: 'manual-install',
+      title: 'Manual Installation & Verification (manual-setup.sh)',
+      description: 'A comprehensive script for manual execution on a VPS to install all dependencies, verify connectivity, and check system readiness. Use this if automated deployment fails.',
+      icon: FileCode,
+      content: `#!/bin/bash
+# Double Tunnel - Manual Installation & Verification Script
+# This script is designed to be run manually on a fresh VPS (Ubuntu/Debian)
+set -e
+
+echo "======================================================"
+echo "   DOUBLE TUNNEL - MANUAL INSTALLATION & VERIFICATION"
+echo "======================================================"
+
+# 1. Root Check
+if [ "$EUID" -ne 0 ]; then
+  echo "[ERROR] Please run as root (sudo su -)"
+  exit 1
+fi
+
+# 2. System Update
+echo "[1/7] Updating system packages..."
+apt-get update && apt-get upgrade -y
+
+# 3. Install Dependencies
+echo "[2/7] Installing WireGuard, Docker, and Networking tools..."
+apt-get install -y wireguard wireguard-tools docker.io docker-compose-v2 iptables iptables-persistent curl iproute2 resolvconf linux-headers-$(uname -r)
+
+# 4. Enable IP Forwarding
+echo "[3/7] Enabling IP Forwarding..."
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-double-tunnel.conf
+sysctl -p /etc/sysctl.d/99-double-tunnel.conf
+
+# 5. Verify Docker
+echo "[4/7] Verifying Docker service..."
+systemctl enable docker
+systemctl start docker
+if systemctl is-active --quiet docker; then
+    echo "[OK] Docker is running."
+else
+    echo "[ERROR] Docker failed to start. Check 'journalctl -u docker'"
+fi
+
+# 6. Verify WireGuard Module
+echo "[5/7] Verifying WireGuard kernel module..."
+modprobe wireguard || true
+if lsmod | grep -q wireguard; then
+    echo "[OK] WireGuard module is loaded."
+else
+    echo "[ERROR] WireGuard module NOT found. You may need to reboot or install headers."
+fi
+
+# 7. Connectivity Test
+echo "[6/7] Testing Internet connectivity..."
+if curl -s --connect-timeout 5 https://google.com > /dev/null; then
+    echo "[OK] Internet access is available."
+else
+    echo "[ERROR] No internet access detected."
+fi
+
+# 8. Port Check
+echo "[7/7] Checking standard ports..."
+for port in 22 51820 51821 51822; do
+    if ss -tuln | grep -q ":$port "; then
+        echo "[INFO] Port $port is in use."
+    else
+        echo "[OK] Port $port is free."
+    fi
+done
+
+echo ""
+echo "======================================================"
+echo "   MANUAL VERIFICATION COMPLETE"
+echo "======================================================"
+echo "If all [OK], you can proceed with the automated deployment."
+echo "If WireGuard or Docker failed, please reboot the VPS and try again."
 `
     },
     {
@@ -2024,6 +2104,50 @@ ClientNames=${preSetupConfig.clientNames}
       }
       
       addLog("Rollback Complete. System is stable.", "success");
+    }
+  };
+
+  const testConfiguration = async () => {
+    if (isTestingConfig) return;
+    setIsTestingConfig(true);
+    addLog("--- Starting VPS Readiness Check ---", "info");
+
+    try {
+      // Find the vps-check script
+      const checkScript = INITIAL_SCRIPTS.find(s => s.id === 'vps-check');
+      if (!checkScript) {
+        addLog("Error: VPS Readiness Check script not found.", "error");
+        setIsTestingConfig(false);
+        return;
+      }
+
+      // Test VPS1
+      addLog(`Testing VPS1 Gateway (${activeTunnel.vps1.ip})...`, "info");
+      const res1 = await sshExecute(activeTunnel.vps1, checkScript.content);
+      if (res1.code === 0 || res1.code === undefined) {
+        addLog("VPS1 Readiness Check Passed!", "success");
+        if (res1.stdout) addLog(res1.stdout, "info");
+      } else {
+        addLog(`VPS1 Readiness Check Failed: ${res1.errorOutput || res1.stderr}`, "error");
+        if (res1.stdout) addLog(res1.stdout, "info");
+      }
+
+      // Test VPS2
+      addLog(`Testing VPS2 Exit Node (${activeTunnel.vps2.ip})...`, "info");
+      const res2 = await sshExecute(activeTunnel.vps2, checkScript.content);
+      if (res2.code === 0 || res2.code === undefined) {
+        addLog("VPS2 Readiness Check Passed!", "success");
+        if (res2.stdout) addLog(res2.stdout, "info");
+      } else {
+        addLog(`VPS2 Readiness Check Failed: ${res2.errorOutput || res2.stderr}`, "error");
+        if (res2.stdout) addLog(res2.stdout, "info");
+      }
+
+      addLog("--- VPS Readiness Check Complete ---", "info");
+    } catch (err: any) {
+      addLog(`Readiness Check Error: ${err.message}`, "error");
+    } finally {
+      setIsTestingConfig(false);
     }
   };
 
@@ -3605,8 +3729,26 @@ PersistentKeepalive = 25`;
 
                         <div className="flex flex-wrap gap-3">
                           <button 
+                            onClick={testConfiguration}
+                            disabled={isTestingConfig || activeTunnel.status === 'deploying'}
+                            className="flex-1 py-4 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-bold rounded-xl border border-zinc-700 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {isTestingConfig ? (
+                              <>
+                                <Activity className="w-5 h-5 animate-spin" />
+                                TESTING...
+                              </>
+                            ) : (
+                              <>
+                                <ShieldCheck className="w-5 h-5" />
+                                TEST CONFIGURATION
+                              </>
+                            )}
+                          </button>
+
+                          <button 
                             onClick={() => startDeployment(false)}
-                            disabled={activeTunnel.status === 'deploying'}
+                            disabled={activeTunnel.status === 'deploying' || isTestingConfig}
                             className="flex-1 py-4 bg-emerald-500 hover:bg-emerald-600 text-zinc-950 font-bold rounded-xl transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/10"
                           >
                             {activeTunnel.status === 'deploying' ? (
