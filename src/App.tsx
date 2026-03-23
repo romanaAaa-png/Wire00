@@ -611,9 +611,22 @@ fix_docker() {
   
   if ! systemctl is-active --quiet "docker"; then
     log_step "Docker still failed after repair. Attempting purge and reinstall..."
-    apt-get purge -y docker.io docker-compose-v2 || true
+    apt-get purge -y docker.io docker-ce docker-ce-cli containerd.io docker-compose-v2 || true
     rm -rf /var/lib/docker || true
-    apt-get install -y docker.io docker-compose-v2 || true
+    
+    # Reinstall using the most reliable method
+    if ! apt-get install -y docker.io; then
+       log_step "docker.io reinstall failed. Trying docker-ce..."
+       apt-get install -y ca-certificates gnupg lsb-release || true
+       mkdir -p /etc/apt/keyrings
+       curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
+       echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null || true
+       apt-get update || true
+       apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+    fi
+    apt-get install -y docker-compose-v2 || true
+    systemctl unmask docker.service || true
+    systemctl daemon-reload
     systemctl start docker || true
   fi
 
@@ -654,13 +667,37 @@ if ! apt-get install -y openresolv; then
   apt-get install -y resolvconf || true
 fi
 
-# Install with non-interactive flags
-apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-  wireguard wireguard-tools iptables docker.io docker-compose-v2 || true
+# Install WireGuard tools
+apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
+
+# Robust Docker Installation
+if ! command -v docker &> /dev/null; then
+  log_step "Docker not found. Attempting installation..."
+  # Try docker.io first (standard Ubuntu/Debian)
+  if ! apt-get install -y docker.io; then
+    log_step "docker.io installation failed. Trying alternative method..."
+    # Fallback to official docker repo if docker.io fails
+    apt-get install -y ca-certificates gnupg lsb-release || true
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null || true
+    apt-get update || true
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin || true
+  fi
+else
+  log_step "Docker is already installed."
+fi
+
+# Ensure docker-compose is available (v2)
+if ! docker compose version &> /dev/null; then
+  log_step "Installing docker-compose-v2..."
+  apt-get install -y docker-compose-v2 || true
+fi
 
 log_step "Starting Docker daemon..."
 systemctl unmask docker.service || true
 systemctl unmask docker.socket || true
+systemctl daemon-reload
 systemctl enable docker || true
 systemctl start docker || true
 wait_for_service "docker"
@@ -1317,12 +1354,21 @@ rm -rf /etc/docker/daemon.json
 
 # 3. Purge and Reinstall
 echo "Purging Docker packages..."
-apt-get purge -y docker.io docker-compose-v2
+apt-get purge -y docker.io docker-ce docker-ce-cli containerd.io docker-compose-v2
 apt-get autoremove -y
 
 echo "Reinstalling Docker..."
 apt-get update
-apt-get install -y docker.io docker-compose-v2
+if ! apt-get install -y docker.io; then
+    echo "docker.io failed, trying official repo..."
+    apt-get install -y ca-certificates gnupg lsb-release
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg || true
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null || true
+    apt-get update
+    apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+fi
+apt-get install -y docker-compose-v2 || true
 
 # 4. Restart
 echo "Starting Docker..."
