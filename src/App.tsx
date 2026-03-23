@@ -42,7 +42,8 @@ import {
   ExternalLink,
   ArrowRightLeft,
   Network,
-  FolderOpen
+  FolderOpen,
+  Wrench
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { QRCodeSVG } from 'qrcode.react';
@@ -956,7 +957,6 @@ echo "--- VPS1 Rollback Complete ---"
       icon: Binoculars,
       content: `#!/bin/bash
 # VPS2 Setup Script (Exit Node) - IP: ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
-set -e
 
 # Logging setup
 LOG_DIR="/root/DTLogs"
@@ -969,6 +969,15 @@ log_step() {
   echo "[$(date)] $1" >> "$LOG_FILE"
   echo "$1"
 }
+
+# Error handling
+error_handler() {
+  local line_no=$1
+  log_step "CRITICAL ERROR: Script failed at line $line_no"
+  collect_debug_info
+  exit 1
+}
+trap 'error_handler $LINENO' ERR
 
 wait_for_service() {
   local service=$1
@@ -1004,11 +1013,9 @@ collect_debug_info() {
   fi
   if command -v docker &> /dev/null; then
     docker ps -a > "$LOG_DIR/docker_containers.txt"
-    docker logs wg-easy &> "$LOG_DIR/wg_easy_container.txt" || true
   fi
   log_step "Debug information collected in $LOG_DIR"
 }
-trap collect_debug_info EXIT
 
 # Helper to fix common package manager issues
 fix_apt() {
@@ -1023,24 +1030,6 @@ fix_apt
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 
-# --- Pre-Deployment Verification ---
-log_step "Verifying current system status..."
-if command -v docker &> /dev/null; then
-  if systemctl is-active --quiet docker; then
-    log_step "Docker is installed and running."
-  else
-    log_step "Docker is installed but NOT running."
-  fi
-else
-  log_step "Docker is NOT installed."
-fi
-if systemctl is-active --quiet wg-quick@wg0; then
-  log_step "WireGuard (wg0) is currently running."
-else
-  log_step "WireGuard (wg0) is NOT running."
-fi
-# -----------------------------------
-
 # 1. Update & Install Official Docker
 log_step "Uninstalling old Docker versions..."
 apt-get remove -y docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc || true
@@ -1052,7 +1041,6 @@ install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
 chmod a+r /etc/apt/keyrings/docker.asc || true
 
-# Add the repository to Apt sources:
 echo "Types: deb
 URIs: https://download.docker.com/linux/ubuntu
 Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\")
@@ -1066,16 +1054,8 @@ log_step "Starting and verifying Docker..."
 systemctl enable docker || true
 systemctl start docker || true
 
-log_step "Checking if reboot is required after Docker installation..."
-if [ -f /var/run/reboot-required ]; then
-  log_step "System requires a reboot. Marking for reboot..."
-  echo "REBOOT_REQUIRED"
-fi
-
 log_step "Installing WireGuard and networking tools..."
-# Try openresolv first, fallback to resolvconf
 if ! apt-get install -y openresolv; then
-  log_step "openresolv not found, trying resolvconf..."
   apt-get install -y resolvconf || true
 fi
 apt-get install -y wireguard wireguard-tools iptables curl iproute2 || true
@@ -1093,14 +1073,15 @@ mkdir -p /etc/wireguard
 cd /etc/wireguard
 
 # Cleanup existing interface
+log_step "Cleaning up existing wg0 interface..."
+wg-quick down wg0 2>/dev/null || true
 ip link delete wg0 2>/dev/null || true
 
 # Generate or use existing keys
+log_step "Generating or retrieving WireGuard keys..."
 if [ -f /etc/wireguard/wg0.key ]; then
-  log_step "Retrieving existing wg0 keys from /etc/wireguard/wg0.key..."
   PRIV_KEY=$(cat /etc/wireguard/wg0.key)
 else
-  log_step "Generating new wg0 keys for the exit node..."
   PRIV_KEY=$(wg genkey)
   echo "$PRIV_KEY" > /etc/wireguard/wg0.key
 fi
@@ -1108,8 +1089,6 @@ PUB_KEY=$(echo "$PRIV_KEY" | wg pubkey)
 echo "$PUB_KEY" > /etc/wireguard/wg0.pub
 
 log_step "Recording VPS2 configuration into /etc/wireguard/wg0.conf..."
-log_step "Exchanging keys: Recording VPS1's public key (__VPS1_WG1_PUB_KEY__) as the gateway peer."
-
 cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $PRIV_KEY
@@ -1119,9 +1098,9 @@ MTU = 1280
 
 # EXIT NODE ROUTING: Forward traffic from VPS1 to the Internet
 PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
-PostUp = iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PostUp = iptables -t nat -A POSTROUTING -o \$(ip route | grep default | awk '{print \$5}' | head -n1 || echo eth0) -j MASQUERADE || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
-PreDown = iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PreDown = iptables -t nat -D POSTROUTING -o \$(ip route | grep default | awk '{print \$5}' | head -n1 || echo eth0) -j MASQUERADE || true
 
 [Peer]
 PublicKey = __VPS1_WG1_PUB_KEY__
@@ -1131,15 +1110,9 @@ EOF
 log_step "Starting wg0 interface..."
 systemctl enable wg-quick@wg0 || true
 if ! systemctl start wg-quick@wg0; then
-  log_step "ERROR: wg-quick@wg0 failed to start via systemd. Attempting manual start for diagnostics..."
+  log_step "ERROR: wg-quick@wg0 failed to start. Attempting manual start..."
   wg-quick up wg0 || true
-  log_step "--- wg0 Status ---"
-  wg show wg0 || true
-  log_step "--- System Logs ---"
-  journalctl -xeu wg-quick@wg0 -n 50 >> "$LOG_FILE" 2>&1 || true
 fi
-# Initial start might fail if keys are placeholders, we'll sync them later
-# wait_for_service "wg-quick@wg0"
 
 # Output keys for the app to capture
 echo "RESULT_WG0_PUB_KEY: $PUB_KEY"
@@ -3020,9 +2993,29 @@ PersistentKeepalive = 25`;
                   <Card title="VPS Credentials" icon={Lock}>
                     <div className="space-y-6">
                       <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Server className="w-4 h-4 text-emerald-500" />
-                          <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">VPS1 (Gateway)</span>
+                        <div className="flex items-center gap-2 mb-2 justify-between">
+                          <div className="flex items-center gap-2">
+                            <Server className="w-4 h-4 text-emerald-500" />
+                            <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">VPS1 (Gateway)</span>
+                          </div>
+                          <button 
+                            onClick={async () => {
+                              try {
+                                addLog("Testing connection to VPS1...", "info");
+                                const res = await sshExecute(activeTunnel.vps1, "echo 'Connection OK'");
+                                if (res.code === 0) {
+                                  addLog("VPS1 Connection Successful!", "success");
+                                } else {
+                                  addLog(`VPS1 Connection Failed: ${res.stderr}`, "error");
+                                }
+                              } catch (err: any) {
+                                addLog(`VPS1 Connection Error: ${err.message}`, "error");
+                              }
+                            }}
+                            className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-widest"
+                          >
+                            Test Connection
+                          </button>
                         </div>
                         <div className="grid grid-cols-1 gap-4">
                           <div className="space-y-1">
@@ -3049,9 +3042,29 @@ PersistentKeepalive = 25`;
                       </div>
 
                       <div className="p-4 bg-zinc-950 rounded-xl border border-zinc-800 space-y-4">
-                        <div className="flex items-center gap-2 mb-2">
-                          <Server className="w-4 h-4 text-emerald-500" />
-                          <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">VPS2 (Exit Node)</span>
+                        <div className="flex items-center gap-2 mb-2 justify-between">
+                          <div className="flex items-center gap-2">
+                            <Server className="w-4 h-4 text-emerald-500" />
+                            <span className="text-xs font-bold text-zinc-400 uppercase tracking-wider">VPS2 (Exit Node)</span>
+                          </div>
+                          <button 
+                            onClick={async () => {
+                              try {
+                                addLog("Testing connection to VPS2...", "info");
+                                const res = await sshExecute(activeTunnel.vps2, "echo 'Connection OK'");
+                                if (res.code === 0) {
+                                  addLog("VPS2 Connection Successful!", "success");
+                                } else {
+                                  addLog(`VPS2 Connection Failed: ${res.stderr}`, "error");
+                                }
+                              } catch (err: any) {
+                                addLog(`VPS2 Connection Error: ${err.message}`, "error");
+                              }
+                            }}
+                            className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-widest"
+                          >
+                            Test Connection
+                          </button>
                         </div>
                         <div className="grid grid-cols-1 gap-4">
                           <div className="space-y-1">
@@ -3815,6 +3828,58 @@ PersistentKeepalive = 25`;
                     <RotateCcw className="w-5 h-5" />
                     <span>REFRESH FROM SERVERS</span>
                   </button>
+
+                  <button 
+                    onClick={async () => {
+                      if (!activeTunnel.vps1.ip || !activeTunnel.vps2.ip) {
+                        addLog("Please provide VPS IPs in Settings first.", "error");
+                        return;
+                      }
+                      addLog("Attempting to fix WireGuard configurations on both servers...", "info");
+                      try {
+                        // Fix VPS2 first (Exit Node)
+                        const vps2Conf = `[Interface]
+PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || 'GENERATED_ON_SERVER'}
+Address = 10.9.0.254/24
+ListenPort = 51820
+MTU = 1280
+PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
+PostUp = iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
+
+[Peer]
+PublicKey = ${activeTunnel.vps1.wg1PublicKey || ''}
+AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`;
+
+                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg0.conf && systemctl restart wg-quick@wg0 || wg-quick up wg0`);
+                        addLog("VPS2 configuration fixed and restarted.", "success");
+
+                        // Fix VPS1 (Gateway)
+                        const vps1Conf = `[Interface]
+PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || 'GENERATED_ON_SERVER'}
+Address = 10.9.0.1/24
+MTU = 1280
+
+[Peer]
+PublicKey = ${activeTunnel.vps2.wg0PublicKey || ''}
+Endpoint = ${activeTunnel.vps2.ip}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25`;
+
+                        await sshExecute(activeTunnel.vps1, `mkdir -p /etc/wireguard && echo "${vps1Conf}" > /etc/wireguard/wg1.conf && systemctl restart wg-quick@wg1 || wg-quick up wg1`);
+                        addLog("VPS1 configuration fixed and restarted.", "success");
+                        
+                        addLog("Manual configuration fix complete. Check tunnel status.", "success");
+                      } catch (err: any) {
+                        addLog(`Failed to fix configuration: ${err.message}`, "error");
+                      }
+                    }}
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                  >
+                    <Wrench className="w-5 h-5" />
+                    <span>FIX CONFIGURATIONS</span>
+                  </button>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -3841,8 +3906,14 @@ PersistentKeepalive = 25`;
                             {copied === 'vps1-wg1-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                           </button>
                         </div>
-                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all">
-                          {activeTunnel.vps1.wg1PublicKey || 'Not Deployed'}
+                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
+                          <input 
+                            type="text"
+                            value={activeTunnel.vps1.wg1PublicKey || ''}
+                            onChange={(e) => updateActiveTunnel({ vps1: { ...activeTunnel.vps1, wg1PublicKey: e.target.value } })}
+                            placeholder="Not Deployed (Enter manually if needed)"
+                            className="bg-transparent border-none outline-none w-full text-zinc-300 placeholder:text-zinc-700"
+                          />
                         </div>
                       </div>
 
@@ -3856,8 +3927,14 @@ PersistentKeepalive = 25`;
                             {copied === 'vps1-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                           </button>
                         </div>
-                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all">
-                          {activeTunnel.vps1.wg0PublicKey || 'Not Deployed'}
+                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
+                          <input 
+                            type="text"
+                            value={activeTunnel.vps1.wg0PublicKey || ''}
+                            onChange={(e) => updateActiveTunnel({ vps1: { ...activeTunnel.vps1, wg0PublicKey: e.target.value } })}
+                            placeholder="Not Deployed (Enter manually if needed)"
+                            className="bg-transparent border-none outline-none w-full text-zinc-300 placeholder:text-zinc-700"
+                          />
                         </div>
                       </div>
                     </div>
@@ -3886,8 +3963,14 @@ PersistentKeepalive = 25`;
                             {copied === 'vps2-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                           </button>
                         </div>
-                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all">
-                          {activeTunnel.vps2.wg0PublicKey || 'Not Deployed'}
+                        <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
+                          <input 
+                            type="text"
+                            value={activeTunnel.vps2.wg0PublicKey || ''}
+                            onChange={(e) => updateActiveTunnel({ vps2: { ...activeTunnel.vps2, wg0PublicKey: e.target.value } })}
+                            placeholder="Not Deployed (Enter manually if needed)"
+                            className="bg-transparent border-none outline-none w-full text-zinc-300 placeholder:text-zinc-700"
+                          />
                         </div>
                       </div>
                     </div>
