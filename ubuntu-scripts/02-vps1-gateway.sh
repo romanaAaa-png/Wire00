@@ -64,10 +64,9 @@ cat <<EOF > /etc/wireguard/wg1.conf
 PrivateKey = $VPS1_PRIV
 Address = 10.9.0.1/24
 ListenPort = 51820
-FwMark = 51820
 Table = off
-PostUp = ip rule add from $VPS1_IP table main priority 10; ip rule add table main suppress_prefixlength 0 priority 20; ip rule add not fwmark 51820 table 51820 priority 30; ip route add default dev wg1 table 51820 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
-PostDown = ip rule del from $VPS1_IP table main priority 10 || true; ip rule del table main suppress_prefixlength 0 priority 20 || true; ip rule del not fwmark 51820 table 51820 priority 30 || true; ip route del default dev wg1 table 51820 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
 
 [Peer]
 PublicKey = $VPS2_PUB
@@ -111,3 +110,13 @@ echo "[+] VPS1 Setup Complete!"
 echo "[+] WG-Easy Web UI: http://$VPS1_IP:51822"
 echo "[+] Default Password: admin"
 echo "[+] You can now log in to the Web UI, create clients, and connect."
+
+echo ""
+echo "[*] Verifying tunnel connectivity..."
+if ping -c 3 10.9.0.2 &> /dev/null; then
+    echo "[+] Tunnel is UP! Successfully pinged VPS2 (10.9.0.2) through the WireGuard tunnel."
+else
+    echo "[-] Tunnel verification failed. Could not ping VPS2 (10.9.0.2)."
+    echo "    Please check your configuration, keys, and ensure UDP port 51820 is open on VPS2."
+fi
+

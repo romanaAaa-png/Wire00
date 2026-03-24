@@ -1847,7 +1847,8 @@ ClientNames=${preSetupConfig.clientNames}
         sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip} "
           PRIV_KEY=\\$(cat /etc/wireguard/private.key)
           PEER_PUB=\\\$(cat /etc/wireguard/wgpub1.key)
-          DEFAULT_IFACE=\\\$(ip route ls default | awk '{print \\$5}' | head -n 1)
+          DEFAULT_IFACE=\\$(ip route ls default | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
+          if [ -z "\\$DEFAULT_IFACE" ]; then DEFAULT_IFACE="eth0"; fi
           cat > /etc/wireguard/wg2.conf << EOF
 [Interface]
 PrivateKey = \\$PRIV_KEY
@@ -1858,7 +1859,7 @@ PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o 
 
 [Peer]
 PublicKey = \\$PEER_PUB
-AllowedIPs = 10.9.0.1/32, 10.8.0.0/24
+AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
           echo 'wg2.conf created on VPS2.'
         "
@@ -1878,8 +1879,8 @@ PrivateKey = \\$PRIV_KEY
 Address = 10.9.0.1/24
 ListenPort = 51820
 Table = off
-PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -3332,8 +3333,8 @@ PersistentKeepalive = 25`;
 PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.2/24
 ListenPort = 51820
-PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps1.wg1PublicKey || ''}
@@ -3348,8 +3349,8 @@ PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.1/24
 ListenPort = 51820
 Table = off
-PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps2.wg0PublicKey || ''}
@@ -4222,10 +4223,9 @@ docker run -d \\
 PrivateKey = <VPS1_PRIVATE_KEY>
 Address = 10.9.0.1/24
 ListenPort = 51820
-FwMark = 51820
 Table = off
-PostUp = ip rule add from ${activeTunnel.vps1.ip || '<VPS1_IP>'} table main priority 10; ip rule add table main suppress_prefixlength 0 priority 20; ip rule add not fwmark 51820 table 51820 priority 30; ip route add default dev wg1 table 51820 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
-PostDown = ip rule del from ${activeTunnel.vps1.ip || '<VPS1_IP>'} table main priority 10 || true; ip rule del table main suppress_prefixlength 0 priority 20 || true; ip rule del not fwmark 51820 table 51820 priority 30 || true; ip route del default dev wg1 table 51820 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
 
 [Peer]
 PublicKey = <VPS2_PUBLIC_KEY>
@@ -4251,7 +4251,7 @@ PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o 
 
 [Peer]
 PublicKey = <VPS1_PUBLIC_KEY>
-AllowedIPs = 10.9.0.1/32, 10.8.0.0/24`}
+AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                         </pre>
                       </div>
                     </div>

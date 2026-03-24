@@ -60,7 +60,7 @@ PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o 
 
 [Peer]
 PublicKey = $VPS1_PUB
-AllowedIPs = 10.9.0.1/32, 10.8.0.0/24
+AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
 
 chmod 600 /etc/wireguard/wg2.conf
