@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,7 +21,6 @@ function createWindow() {
   // Read setup.ini
   const setupIniPath = 'C:\\DoubleTunnel\\setup.ini';
   try {
-    const fs = await import('fs');
     if (fs.existsSync(setupIniPath)) {
       const setupIniContent = fs.readFileSync(setupIniPath, 'utf-8');
       console.log('setup.ini read successfully');
