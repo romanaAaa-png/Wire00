@@ -1879,7 +1879,7 @@ PrivateKey = \$PRIV_KEY
 Address = 10.9.0.1/24
 ListenPort = 51820
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
 PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
 
 [Peer]
@@ -1919,7 +1919,7 @@ EOF
           -e WG_HOST=${currentTunnel.vps1.ip} \\
           -e WG_PORT=51821 \\
           -e PORT=51822 \\
-          -e PASSWORD_HASH='$2a$10$w.9.y/v.z.x.y.z.x.y.z.x.y.z.x.y.z.x.y.z.x.y.z.x.y.z.x' \\
+          -e PASSWORD_HASH='$2a$10$jB0akgOdR4cShIVoDFO3zuNvuk/IvmmdxbQKkNIYu8zOy363gdGXC' \\
           -e WG_DEFAULT_DNS=1.1.1.1 \\
           -e WG_DEFAULT_ADDRESS=10.8.0.x \\
           -e WG_MTU=1280 \\
@@ -3349,7 +3349,7 @@ PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.1/24
 ListenPort = 51820
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
 PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
 
 [Peer]
