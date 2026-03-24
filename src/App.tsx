@@ -28,18 +28,14 @@ import {
   AlertTriangle,
   ShieldAlert,
   ShieldCheck,
-  Database,
   ChevronRight,
   ChevronLeft,
-  Menu,
   X,
   XCircle,
-  Search,
   Monitor,
   Smartphone,
   ExternalLink,
   ArrowRightLeft,
-  Network,
   FolderOpen,
   Wrench
 } from 'lucide-react';
@@ -235,11 +231,9 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'wg-keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
+  const [activeTab, setActiveTab] = useState('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [isDeploying, setIsDeploying] = useState(false);
   const [isTestingConfig, setIsTestingConfig] = useState(false);
-  const [showManualScript, setShowManualScript] = useState(false);
   const cancelDeploymentRef = useRef(false);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'online' | 'offline'>('checking');
   
@@ -1681,55 +1675,8 @@ ClientNames=${preSetupConfig.clientNames}
     }
   };
 
-  const rebootVpsAndWait = async (vps: VPSConfig, vpsName: string) => {
-    const vpsKey = vps.ip === activeTunnel.vps1.ip ? 'vps1' : 'vps2';
-    addLog(`Initiating reboot for ${vpsName}...`, "info", vpsKey);
-    try {
-      // Send reboot command and ignore the inevitable disconnection error
-      await sshExecute(vps, "reboot");
-    } catch (e) {
-      // Expected disconnection
-    }
-    
-    addLog(`Waiting for ${vpsName} to come back online (this may take up to 2 minutes)...`, "info", vpsKey);
-    
-    // Wait for 15 seconds before starting to check (give it time to actually shut down)
-    await new Promise(r => setTimeout(r, 15000));
-    
-    let backOnline = false;
-    const maxAttempts = 24; // 24 * 5 seconds = 2 minutes
-    for (let i = 0; i < maxAttempts; i++) {
-      try {
-        const res = await sshExecute(vps, "echo 'online'");
-        if (res.stdout.trim().includes('online')) {
-          backOnline = true;
-          break;
-        }
-      } catch (e) {
-        // Still offline or SSH not ready
-      }
-      await new Promise(r => setTimeout(r, 5000));
-    }
-    
-    if (!backOnline) {
-      throw new Error(`${vpsName} failed to come back online after reboot. Please check it manually.`);
-    }
-    
-    addLog(`${vpsName} is back online. Resuming deployment...`, "success", vpsKey);
-  };
-
-  const isVpsDeployed = async (vps: VPSConfig, interfaces: string[]) => {
-    try {
-      const checkCmd = interfaces.map(iface => 
-        `[ -f /etc/wireguard/${iface}.conf ] && [ "$(systemctl is-active wg-quick@${iface} || echo 'inactive')" == "active" ]`
-      ).join(' && ') + ' && [ "$(cat /proc/sys/net/ipv4/ip_forward || echo 0)" == "1" ] && echo "DEPLOYED"';
-      
-      const result = await sshExecute(vps, checkCmd);
-      return result.stdout.trim() === 'DEPLOYED';
-    } catch (e) {
-      return false;
-    }
-  };
+  // Removed unused rebootVpsAndWait
+  // Removed unused isVpsDeployed
 
     const startDeployment = async (isCleanInstall: boolean = false) => {
     if (!activeTunnel.vps1.password || !activeTunnel.vps2.password) {
@@ -1742,7 +1689,7 @@ ClientNames=${preSetupConfig.clientNames}
       return;
     }
 
-    setIsDeploying(true);
+    // setIsDeploying(true);
     cancelDeploymentRef.current = false;
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
     addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info", "exchange");
@@ -1771,8 +1718,6 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Step 2: VPS2 installing WireGuard & wg-easy...", "info", "vps2");
       await sshExecute(currentTunnel.vps2, `
         apt-get install -y wireguard wireguard-tools
-        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
-        sysctl -p /etc/sysctl.d/99-wireguard.conf
         wg --version
         docker pull weejewel/wg-easy
       `);
@@ -1948,7 +1893,7 @@ EOF
 
       updateActiveTunnel({ status: 'deployed' });
       addLog("Double VPN Deployment Successful!", "success", "exchange");
-      setIsDeploying(false);
+      // setIsDeploying(false);
       setActiveTab("vps1");
 
     } catch (error: any) {
@@ -1958,7 +1903,7 @@ EOF
         addLog(`Deployment Failed: ${error.message}`, "error", "exchange");
       }
       updateActiveTunnel({ status: 'failed' });
-      setIsDeploying(false);
+      // setIsDeploying(false);
     }
   };
 
@@ -2082,7 +2027,7 @@ EOF
       `Kernel: Linux 6.1.0-18-amd64`,
       `Memory: ${Math.floor(Math.random() * 1000)}MB / 2048MB`,
       `\n--- WireGuard Status ---`,
-      vpsId === 'vps1' ? `interface: wg0\n  public key: ${activeTunnel.vps1.publicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps2.publicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps2.ip}:51820\n  allowed ips: 10.0.0.2/32\n  latest handshake: 5 seconds ago` : `interface: wg0\n  public key: ${activeTunnel.vps2.publicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps1.publicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps1.ip}:51820\n  allowed ips: 10.0.0.1/32\n  latest handshake: 5 seconds ago`,
+      vpsId === 'vps1' ? `interface: wg0\n  public key: ${activeTunnel.vps1.wg0PublicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps2.wg0PublicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps2.ip}:51820\n  allowed ips: 10.0.0.2/32\n  latest handshake: 5 seconds ago` : `interface: wg0\n  public key: ${activeTunnel.vps2.wg0PublicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps1.wg0PublicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps1.ip}:51820\n  allowed ips: 10.0.0.1/32\n  latest handshake: 5 seconds ago`,
       `\n--- Firewall Rules (iptables) ---`,
       `-A FORWARD -i wg0 -j ACCEPT`,
       `-A FORWARD -o wg0 -j ACCEPT`,
@@ -2188,7 +2133,7 @@ PersistentKeepalive = 25`;
       icon: FileCode
     };
     setScripts([...scripts, script]);
-    setNewScript({ title: '', description: '', content: '' });
+    setNewScript({ title: '', description: '', content: '', rollbackContent: '' });
     setShowAddScript(false);
   };
 
@@ -2854,7 +2799,7 @@ PersistentKeepalive = 25`;
                                           </p>
                                         </div>
                                         {conflict && (
-                                          <AlertTriangle className="w-3 h-3 text-amber-500" title={`Conflict with ${conflict.service}`} />
+                                          <AlertTriangle className="w-3 h-3 text-amber-500" />
                                         )}
                                       </div>
                                     );
@@ -5233,6 +5178,18 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                     size={200}
                     level="H"
                   />
+                </div>
+
+                <div className="w-full bg-zinc-800/50 p-4 rounded-xl text-left space-y-2">
+                  <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">WG Easy UI Config</h4>
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-zinc-500">Public Key:</p>
+                    <code className="text-[10px] text-zinc-200 break-all bg-zinc-950 p-1 rounded">{selectedPeer.publicKey}</code>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-[10px] text-zinc-500">Allowed IPs:</p>
+                    <code className="text-[10px] text-zinc-200 break-all bg-zinc-950 p-1 rounded">{selectedPeer.allowedIPs}</code>
+                  </div>
                 </div>
 
                 <div className="w-full space-y-3">

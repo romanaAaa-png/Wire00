@@ -1,82 +1,38 @@
 {
   "name": "double-tunnel",
   "private": true,
-  "version": "1.1.4",
+  "version": "0.0.0",
   "type": "module",
-  "main": "electron/main.cjs",
-  "description": "Double Tunnel Management Console",
-  "author": "Roman Almakaev",
   "scripts": {
-    "dev": "tsx server.ts",
-    "build": "vite build",
-    "preview": "vite preview",
-    "clean": "rm -rf dist",
-    "lint": "tsc --noEmit",
-    "electron:dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && electron electron/main.cjs\"",
-    "electron:build": "npm run build && electron-builder build --win",
-    "android:init": "cap init \"Double Tunnel VPN\" com.doubletunnel.manager --web-dir dist",
-    "android:add": "cap add android",
-    "android:sync": "npm run build && cap sync android",
-    "android:open": "cap open android"
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
     "clsx": "^2.1.1",
-    "dotenv": "^17.2.3",
-    "express": "^4.21.2",
-    "lucide-react": "^0.546.0",
-    "motion": "^12.23.24",
-    "qrcode.react": "^4.2.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "ssh2": "^1.17.0",
-    "tailwind-merge": "^3.5.0"
+    "lucide-react": "^0.454.0",
+    "motion": "^11.11.11",
+    "postcss-import": "^16.1.1",
+    "qrcode.react": "^4.1.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwind-merge": "^2.5.4"
   },
   "devDependencies": {
-    "@capacitor/android": "^8.2.0",
-    "@capacitor/cli": "^8.2.0",
-    "@capacitor/core": "^8.2.0",
-    "@tailwindcss/vite": "^4.1.14",
-    "@types/express": "^4.17.21",
-    "@types/node": "^22.14.0",
-    "@types/ssh2": "^1.15.5",
-    "@vitejs/plugin-react": "^5.0.4",
-    "autoprefixer": "^10.4.21",
-    "concurrently": "^9.2.1",
-    "electron": "^41.0.3",
-    "electron-builder": "^26.8.1",
-    "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
-    "typescript": "~5.8.2",
-    "vite": "^6.2.0",
-    "wait-on": "^9.0.4"
-  },
-  "build": {
-    "appId": "com.doubletunnel.manager",
-    "productName": "Double Tunnel",
-    "directories": {
-      "output": "dist-electron"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*"
-    ],
-    "win": {
-      "target": "nsis",
-      "icon": "public/icon.png",
-      "verifyUpdateCodeSignature": false
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": true,
-      "allowElevation": true,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": "always",
-      "createStartMenuShortcut": true,
-      "shortcutName": "Double Tunnel",
-      "uninstallDisplayName": "Uninstall Double Tunnel",
-      "deleteAppDataOnUninstall": true,
-      "artifactName": "${productName} Setup ${version}.${ext}"
-    }
+    "@eslint/js": "^9.13.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9.13.0",
+    "eslint-plugin-react-hooks": "^5.0.0",
+    "eslint-plugin-react-refresh": "^0.4.14",
+    "globals": "^15.11.0",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.11.0",
+    "vite": "^5.4.9"
   }
 }
