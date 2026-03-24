@@ -611,13 +611,12 @@ ListenPort = __WG_INTER_VPS_PORT__
 MTU = 1280
 Table = off
 
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.\$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
 PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
-PostUp = ip rule add from 10.0.0.0/24 table 200 priority 10 || true
 PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
-PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
+PostUp = ip rule add from \$PRIMARY_IP table main pref 100 || true
 PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
 PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
 PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT || true
@@ -628,9 +627,8 @@ PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMS
 PreDown = ip route del 10.9.0.0/24 dev %i || true
 PreDown = ip route del default dev %i table 200 || true
 PreDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true
-PreDown = ip rule del from 10.0.0.0/24 table 200 priority 10 || true
 PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
-PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
+PreDown = ip rule del from \$PRIMARY_IP table main pref 100 || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
 PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
 PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
@@ -792,7 +790,7 @@ do_configure() {
   cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $PRIV_KEY
-Address = 10.9.0.254/24
+Address = 10.9.0.2/24
 ListenPort = __WG_EXIT_PORT__
 MTU = 1280
 
@@ -1848,6 +1846,8 @@ EOF
         sshpass -p '${currentTunnel.vps1.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps1.ip} "
           PRIV_KEY=\\$(cat /etc/wireguard/private.key)
           PEER_PUB=\\\$(cat /etc/wireguard/wgpub2.key)
+          DEFAULT_IFACE=\\$(ip route ls default | awk '/default/ {for(i=1;i<=NF;i++) if(\$i=="dev") print \$(i+1)}' | head -n 1)
+          if [ -z "\\$DEFAULT_IFACE" ]; then DEFAULT_IFACE="eth0"; fi
           cat > /etc/wireguard/wg1.conf << EOF
 [Interface]
 PrivateKey = \$PRIV_KEY
@@ -1855,8 +1855,8 @@ Address = 10.9.0.1/24
 ListenPort = 51820
 MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.\$DEFAULT_IFACE.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -3332,8 +3332,8 @@ Address = 10.9.0.1/24
 ListenPort = 51820
 MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps2.wg0PublicKey || ''}
@@ -4211,8 +4211,8 @@ Address = 10.9.0.1/24
 ListenPort = 51820
 MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.<PRIMARY_IF>.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = <VPS2_PUBLIC_KEY>

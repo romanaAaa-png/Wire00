@@ -91,7 +91,7 @@ do_configure() {
   cat <<EOF > /etc/wireguard/wg0.conf
 [Interface]
 PrivateKey = $PRIV_KEY
-Address = 10.9.0.254/24
+Address = 10.9.0.2/24
 ListenPort = $WG_EXIT_PORT
 MTU = 1280
 

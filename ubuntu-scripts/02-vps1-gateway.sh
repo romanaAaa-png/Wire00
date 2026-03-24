@@ -154,11 +154,10 @@ ListenPort = $WG_INTER_VPS_PORT
 MTU = 1280
 Table = off
 
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
 PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
-PostUp = ip rule add from 10.0.0.0/24 table 200 priority 10 || true
 PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
 PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
 PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
@@ -171,7 +170,6 @@ PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMS
 PreDown = ip route del 10.9.0.0/24 dev %i || true
 PreDown = ip route del default dev %i table 200 || true
 PreDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true
-PreDown = ip rule del from 10.0.0.0/24 table 200 priority 10 || true
 PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
 PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
@@ -191,6 +189,13 @@ EOF
   log_step "configure" "Starting WireGuard wg1..."
   systemctl enable wg-quick@wg1 || true
   systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
+
+  # Verification
+  if ip a show wg1 >/dev/null 2>&1; then
+    log_step "configure" "SUCCESS: wg1 interface is UP."
+  else
+    log_step "configure" "ERROR: wg1 interface failed to start. Check 'journalctl -u wg-quick@wg1'"
+  fi
 
   log_step "configure" "--- VPS1 Configuration Phase Complete ---"
 }
