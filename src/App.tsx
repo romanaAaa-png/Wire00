@@ -1,6 +1,4 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Terminal as XTerm } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
 import { 
   Shield, 
   Server, 
@@ -237,7 +235,7 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
 };
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'terminal' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'wg-keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'peers' | 'config' | 'scripts' | 'setup' | 'deploy' | 'platforms' | 'keys' | 'wg-keys' | 'port-forwarding' | 'diagnostics' | 'uninstall' | 'pre-setup'>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isDeploying, setIsDeploying] = useState(false);
   const [isTestingConfig, setIsTestingConfig] = useState(false);
@@ -262,135 +260,6 @@ export default function App() {
   }, []);
   const [consoleLogs, setConsoleLogs] = useState<{type: string, message: string, timestamp: string}[]>([]);
   const [vpsLogs, setVpsLogs] = useState<{vps: string, logs: string}[]>([]);
-  const [terminalInput, setTerminalInput] = useState('');
-  const [pasteBuffer, setPasteBuffer] = useState('');
-  const [selectedVpsIndex, setSelectedVpsIndex] = useState(0);
-  const terminalRef = useRef<HTMLDivElement>(null);
-  const xtermRef = useRef<XTerm | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
-
-  const connectTerminal = () => {
-    if (!xtermRef.current) return;
-    if (wsRef.current) wsRef.current.close();
-    
-    const vps = selectedVpsIndex === 0 ? activeTunnel.vps1 : activeTunnel.vps2;
-    if (!vps.ip || !vps.password) {
-      xtermRef.current.writeln('\r\n\x1b[1;31m[ERROR] Please provide VPS IP and password in Settings first.\x1b[0m');
-      return;
-    }
-
-    xtermRef.current.clear();
-    xtermRef.current.writeln(`\x1b[1;32mConnecting to ${vps.name || (selectedVpsIndex === 0 ? 'VPS1' : 'VPS2')} (${vps.ip})...\x1b[0m`);
-
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/terminal`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        type: 'connect',
-        config: {
-          host: vps.ip,
-          username: vps.user,
-          password: vps.password
-        }
-      }));
-    };
-
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'data' && xtermRef.current) {
-        xtermRef.current.write(msg.data);
-      } else if (msg.type === 'error') {
-        xtermRef.current?.writeln(`\r\n\x1b[1;31m[SSH ERROR] ${msg.message}\x1b[0m`);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      xtermRef.current?.writeln(`\r\n\x1b[1;31m[WebSocket ERROR] Connection failed. Please check network or proxy settings.\x1b[0m`);
-    };
-
-    ws.onclose = () => {
-      xtermRef.current?.writeln('\r\n\x1b[1;33m[SESSION CLOSED]\x1b[0m');
-    };
-  };
-
-  useEffect(() => {
-    if (activeTab === 'terminal' && terminalRef.current && !xtermRef.current) {
-      const term = new XTerm({
-        cursorBlink: true,
-        theme: {
-          background: '#0c0c0c',
-          foreground: '#10b981',
-          cursor: '#10b981',
-          selectionBackground: 'rgba(16, 185, 129, 0.3)',
-        },
-        fontSize: 14,
-        fontFamily: '"JetBrains Mono", monospace',
-        rows: 24,
-      });
-
-      const fitAddon = new FitAddon();
-      term.loadAddon(fitAddon);
-      term.open(terminalRef.current);
-      fitAddon.fit();
-
-      term.writeln('\x1b[1;32m _      _____ _____  ______ _____ _    _  _   _____  _____\x1b[0m');
-      term.writeln('\x1b[1;32m| |    |  _  |  __ \\|  ____/ ____| |  | |/ \\ |  __ \\|  __ \\\x1b[0m');
-      term.writeln('\x1b[1;32m| |    | | | | |  | | |__ | |  __| |  | / _ \\| |__) | |  |\x1b[0m');
-      term.writeln('\x1b[1;32m| |    | | | | |  | |  __|| | |_ | |  | / ___ \\  _  /| |  |\x1b[0m');
-      term.writeln('\x1b[1;32m| |____\\ \\_/ / |__| | |___| |__| | |__| / /   \\ \\ | \\ \\| |__|\x1b[0m');
-      term.writeln('\x1b[1;32m|______|\\___/|_____/|______\\_____|\\____/_/     \\_\\_|  \\_\\_____/\x1b[0m');
-      term.writeln('');
-      term.writeln('\x1b[1;30mIntegrated SSH Terminal Ready.\x1b[0m');
-      term.writeln('\x1b[1;30mSelect a VPS and click "ESTABLISH CONNECTION" to start.\x1b[0m');
-
-      term.onData(data => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'data', data }));
-        }
-      });
-
-      term.onResize(size => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'resize',
-            cols: size.cols,
-            rows: size.rows
-          }));
-        }
-      });
-
-      xtermRef.current = term;
-      term.focus();
-
-      const terminalElement = terminalRef.current;
-      const handleContextMenu = async (e: MouseEvent) => {
-        e.preventDefault();
-        try {
-          const text = await navigator.clipboard.readText();
-          if (text && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ type: 'data', data: text }));
-          }
-        } catch (err) {
-          console.error('Failed to read clipboard:', err);
-        }
-      };
-      terminalElement?.addEventListener('contextmenu', handleContextMenu);
-
-      const handleResize = () => fitAddon.fit();
-      window.addEventListener('resize', handleResize);
-      
-      return () => {
-        window.removeEventListener('resize', handleResize);
-        terminalElement?.removeEventListener('contextmenu', handleContextMenu);
-        if (wsRef.current) wsRef.current.close();
-        term.dispose();
-        xtermRef.current = null;
-      };
-    }
-  }, [activeTab]);
 
   useEffect(() => {
     const originalLog = console.log;
@@ -629,9 +498,9 @@ do_configure() {
     docker rm wg-easy 2>/dev/null || true
   fi
 
-  log_step "configure" "Configuring WG-Easy in /opt/wg-easy..."
-  mkdir -p /opt/wg-easy
-  cat <<EOF > /opt/wg-easy/docker-compose.yml
+  log_step "configure" "Configuring WG-Easy in /etc/wireguard..."
+  mkdir -p /etc/wireguard
+  cat <<EOF > /etc/wireguard/docker-compose.yml
 services:
   wg-easy:
     environment:
@@ -641,22 +510,18 @@ services:
       - WG_DEFAULT_DNS=1.1.1.1
       - WG_ALLOWED_IPS=0.0.0.0/0
       - WG_PORT=__WG_EASY_PORT__
+      - PORT=__WG_EASY_UI_PORT__
     image: ghcr.io/wg-easy/wg-easy
     container_name: wg-easy
+    network_mode: "host"
     volumes:
       - .:/etc/wireguard
-    ports:
-      - "__WG_EASY_PORT__:__WG_EASY_PORT__/udp"
-      - "__WG_EASY_UI_PORT__:51821/tcp"
     restart: unless-stopped
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-      - net.ipv4.ip_forward=1
 EOF
-  cd /opt/wg-easy && docker compose up -d
+  cd /etc/wireguard && docker compose up -d
 
   log_step "configure" "Enabling IP Forwarding..."
   sysctl -w net.ipv4.ip_forward=1 || true
@@ -684,17 +549,21 @@ Table = off
 PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 || true
+PostUp = ip rule add from 10.0.0.0/24 table 200 || true
 PostUp = ip rule add from 10.9.0.1 table 200 || true
 PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
 PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
+PostUp = iptables -A FORWARD -o %i -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
 
 PreDown = ip route del 10.9.0.0/24 dev %i || true
 PreDown = ip route del default dev %i table 200 || true
 PreDown = ip rule del from 10.8.0.0/24 table 200 || true
+PreDown = ip rule del from 10.0.0.0/24 table 200 || true
 PreDown = ip rule del from 10.9.0.1 table 200 || true
 PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
 
 [Peer]
@@ -759,8 +628,8 @@ esac
 # VPS1 Rollback Script
 systemctl stop wg-quick@wg1 || true
 systemctl disable wg-quick@wg1 || true
-cd /opt/wg-easy && docker compose down || true
-rm -rf /opt/wg-easy /etc/wireguard/wg1.*
+cd /etc/wireguard && docker compose down || true
+rm -rf /etc/wireguard/wg1.*
 `
     },
     {
@@ -856,8 +725,10 @@ ListenPort = __WG_EXIT_PORT__
 MTU = 1280
 
 PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
+PostUp = iptables -A FORWARD -o %i -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o $PRIMARY_IF -j MASQUERADE || true
 
 [Peer]
@@ -1113,7 +984,6 @@ apt-get clean
 
 # 3. Remove configurations
 rm -rf /etc/wireguard
-rm -rf /opt/wg-easy
 rm -rf /var/lib/docker
 rm -rf /etc/docker
 
@@ -1538,7 +1408,6 @@ pause
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [isRotating, setIsRotating] = useState(false);
-  const [terminalOutput, setTerminalOutput] = useState<string[]>([]);
   
   // --- Simulation: Live Peer Activity ---
   useEffect(() => {
@@ -1933,8 +1802,8 @@ ClientNames=${preSetupConfig.clientNames}
       await sshExecute(currentTunnel.vps1, `
         sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${currentTunnel.vps2.ip} "
           mkdir -p /etc/wireguard
-          wg genkey | tee /etc/wireguard/wg0.conf | wg pubkey > /etc/wireguard/wgpub2.key
-          chmod 600 /etc/wireguard/wg0.conf
+          wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/wgpub2.key
+          chmod 600 /etc/wireguard/private.key
           echo 'VPS2 Keys generated successfully.'
         "
       `);
@@ -1955,8 +1824,8 @@ ClientNames=${preSetupConfig.clientNames}
       await sshExecute(currentTunnel.vps2, `
         sshpass -p '${currentTunnel.vps1.password}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${currentTunnel.vps1.ip} "
           mkdir -p /etc/wireguard
-          wg genkey | tee /etc/wireguard/wg0.conf | wg pubkey > /etc/wireguard/wgpub1.key
-          chmod 600 /etc/wireguard/wg0.conf
+          wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/wgpub1.key
+          chmod 600 /etc/wireguard/private.key
           echo 'VPS1 Keys generated successfully.'
         "
       `);
@@ -1976,7 +1845,7 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Step 11: VPS1 configuring wg2.conf on VPS2...", "info", "exchange");
       await sshExecute(currentTunnel.vps1, `
         sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip} "
-          PRIV_KEY=\\$(cat /etc/wireguard/wg0.conf)
+          PRIV_KEY=\\$(cat /etc/wireguard/private.key)
           PEER_PUB=\\\$(cat /etc/wireguard/wgpub1.key)
           DEFAULT_IFACE=\\\$(ip route ls default | awk '{print \\$5}' | head -n 1)
           cat > /etc/wireguard/wg2.conf << EOF
@@ -1984,8 +1853,8 @@ ClientNames=${preSetupConfig.clientNames}
 PrivateKey = \\$PRIV_KEY
 Address = 10.9.0.2/24
 ListenPort = 51820
-PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE || true
+PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -2001,17 +1870,16 @@ EOF
       addLog("Step 12: VPS2 configuring wg1.conf on VPS1...", "info", "exchange");
       await sshExecute(currentTunnel.vps2, `
         sshpass -p '${currentTunnel.vps1.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps1.ip} "
-          PRIV_KEY=\\$(cat /etc/wireguard/wg0.conf)
+          PRIV_KEY=\\$(cat /etc/wireguard/private.key)
           PEER_PUB=\\\$(cat /etc/wireguard/wgpub2.key)
           cat > /etc/wireguard/wg1.conf << EOF
 [Interface]
 PrivateKey = \\$PRIV_KEY
 Address = 10.9.0.1/24
 ListenPort = 51820
-FwMark = 51820
 Table = off
-PostUp = ip rule add from ${currentTunnel.vps1.ip} table main priority 10; ip rule add table main suppress_prefixlength 0 priority 20; ip rule add not fwmark 51820 table 51820 priority 30; ip route add default dev wg1 table 51820 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
-PostDown = ip rule del from ${currentTunnel.vps1.ip} table main priority 10 || true; ip rule del table main suppress_prefixlength 0 priority 20 || true; ip rule del not fwmark 51820 table 51820 priority 30 || true; ip route del default dev wg1 table 51820 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
+PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -2024,9 +1892,44 @@ EOF
       `);
       addLog("Step 12 Complete: wg1.conf created on VPS1.", "success", "exchange");
 
-      // Step 13: Launch wireguard on both VPS and verify secure tunnel
+      // Step 13: Configure wg-easy and launch wireguard on both VPS
       checkCancel();
-      addLog("Step 13: Launching WireGuard on both servers...", "info", "exchange");
+      addLog("Step 13: Configuring wg-easy and launching WireGuard on both servers...", "info", "exchange");
+      
+      await sshExecute(currentTunnel.vps1, `
+        docker stop wg-easy || true
+        docker rm wg-easy || true
+        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+        sysctl -p /etc/sysctl.d/99-wireguard.conf
+        
+        # Update MTU for existing clients if any
+        if [ -d /etc/wireguard/clients ]; then
+          find /etc/wireguard/clients -name "*.conf" -exec sed -i 's/MTU = .*/MTU = 1280/' {} + || true
+        fi
+        # Fix ListenPort conflict if wg0.conf was generated previously with default port
+        # wg-easy overwrites changes to wg0.conf, so we must delete it to force regeneration
+        if grep -q "ListenPort = 51820" /etc/wireguard/wg0.conf 2>/dev/null; then
+          rm -f /etc/wireguard/wg0.conf
+        fi
+        
+        docker run -d \\
+          --name=wg-easy \\
+          --network host \\
+          -e WG_HOST=${currentTunnel.vps1.ip} \\
+          -e WG_PORT=51821 \\
+          -e PORT=51822 \\
+          -e PASSWORD_HASH='$2a$10$jB0akgOdR4cShIVoDFO3zuNvuk/IvmmdxbQKkNIYu8zOy363gdGXC' \\
+          -e WG_DEFAULT_DNS=1.1.1.1 \\
+          -e WG_DEFAULT_ADDRESS=10.8.0.x \\
+          -e WG_MTU=1280 \\
+          -e WG_ALLOWED_IPS=0.0.0.0/0 \\
+          -v /etc/wireguard:/etc/wireguard \\
+          --cap-add=NET_ADMIN \\
+          --cap-add=SYS_MODULE \\
+          --restart unless-stopped \\
+          ghcr.io/wg-easy/wg-easy
+      `);
+
       await sshExecute(currentTunnel.vps2, "systemctl enable wg-quick@wg2 && systemctl restart wg-quick@wg2");
       await sshExecute(currentTunnel.vps1, "systemctl enable wg-quick@wg1 && systemctl restart wg-quick@wg1");
       
@@ -2038,33 +1941,7 @@ EOF
         addLog("Tunnel verification failed. Ping to 10.9.0.2 did not succeed.", "error", "exchange");
       }
 
-      // Step 14: On VPS1 to configure wireguard for external peers interface
-      checkCancel();
-      addLog("Step 14: Configuring external peers interface (wg-easy) on VPS1...", "info", "vps1");
-      await sshExecute(currentTunnel.vps1, `
-        docker stop wg-easy || true
-        docker rm wg-easy || true
-        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
-        sysctl -p /etc/sysctl.d/99-wireguard.conf
-        
-        docker run -d \\
-          --name=wg-easy \\
-          -e WG_HOST=${currentTunnel.vps1.ip} \\
-          -e PASSWORD=admin \\
-          -e WG_DEFAULT_DNS=1.1.1.1 \\
-          -e WG_DEFAULT_ADDRESS=10.8.0.x \\
-          -e WG_ALLOWED_IPS=0.0.0.0/0 \\
-          -v ~/.wg-easy:/etc/wireguard \\
-          -p 51821:51820/udp \\
-          -p 51822:51821/tcp \\
-          --cap-add=NET_ADMIN \\
-          --cap-add=SYS_MODULE \\
-          --sysctl="net.ipv4.conf.all.src_valid_mark=1" \\
-          --sysctl="net.ipv4.ip_forward=1" \\
-          --restart unless-stopped \\
-          weejewel/wg-easy
-      `);
-      addLog("Step 14 Complete: wg-easy started on VPS1.", "success", "vps1");
+      addLog("Step 13 Complete: wg-easy started and tunnels verified.", "success", "exchange");
 
       updateActiveTunnel({ status: 'deployed' });
       addLog("Double VPN Deployment Successful!", "success", "exchange");
@@ -2156,37 +2033,13 @@ EOF
       const res = await sshExecute(activeTunnel.vps1, script.content);
       if (res.code === 0) {
         addLog(`${script.title} executed successfully.`, "success");
-        if (xtermRef.current) {
-          xtermRef.current.writeln(`\x1b[1;32m[${script.title} Output]\x1b[0m`);
-          xtermRef.current.writeln(res.stdout);
-        }
       } else {
         addLog(`${script.title} failed: ${res.errorOutput}`, "error");
-        if (xtermRef.current) {
-          xtermRef.current.writeln(`\x1b[1;31m[${script.title} Error]\x1b[0m`);
-          xtermRef.current.writeln(res.errorOutput);
-        }
       }
     } catch (err: any) {
       addLog(`Automation Error: ${err.message}`, "error");
     } finally {
       setIsRotating(false);
-    }
-  };
-
-  const executeCommand = (command: string) => {
-    const trimmedCmd = command.trim();
-    if (!trimmedCmd) return;
-
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'data', data: trimmedCmd + '\n' }));
-      return;
-    }
-
-    // Fallback for when terminal is not connected
-    setTerminalOutput(prev => [...prev, `[NOT CONNECTED] root@vps1:~# ${trimmedCmd}`]);
-    if (xtermRef.current) {
-      xtermRef.current.writeln(`\r\n\x1b[1;31m[NOT CONNECTED] Please establish connection first.\x1b[0m`);
     }
   };
 
@@ -2454,7 +2307,6 @@ PersistentKeepalive = 25`;
             { id: 'keys', icon: Lock, label: 'SSH Key Manager' },
             { id: 'wg-keys', icon: Key, label: 'WireGuard Keys' },
             { id: 'deploy', icon: Play, label: 'Deployment Manager' },
-            { id: 'terminal', icon: Terminal, label: 'Integrated Terminal' },
             { id: 'config', icon: Settings, label: 'Server Config' },
             { id: 'setup', icon: Globe, label: 'Setup Guide' },
             { id: 'platforms', icon: Monitor, label: 'Cross-Platform' },
@@ -3478,26 +3330,26 @@ PersistentKeepalive = 25`;
                         // Fix VPS2 first (Exit Node)
                         const vps2Conf = `[Interface]
 PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || 'GENERATED_ON_SERVER'}
-Address = 10.9.0.254/24
+Address = 10.9.0.2/24
 ListenPort = 51820
-MTU = 1280
-PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
-PostUp = iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
-PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
-PreDown = iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
+PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o $(ip route | grep default | awk '{print $5}' | head -n1 || echo eth0) -j MASQUERADE || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps1.wg1PublicKey || ''}
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`;
 
-                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg0.conf && systemctl restart wg-quick@wg0 || wg-quick up wg0`);
+                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg2.conf && systemctl restart wg-quick@wg2 || wg-quick up wg2`);
                         addLog("VPS2 configuration fixed and restarted.", "success");
 
                         // Fix VPS1 (Gateway)
                         const vps1Conf = `[Interface]
 PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.1/24
-MTU = 1280
+ListenPort = 51820
+Table = off
+PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps2.wg0PublicKey || ''}
@@ -3508,6 +3360,40 @@ PersistentKeepalive = 25`;
                         await sshExecute(activeTunnel.vps1, `mkdir -p /etc/wireguard && echo "${vps1Conf}" > /etc/wireguard/wg1.conf && systemctl restart wg-quick@wg1 || wg-quick up wg1`);
                         addLog("VPS1 configuration fixed and restarted.", "success");
                         
+                        // Fix wg-easy MTU
+                        await sshExecute(activeTunnel.vps1, `
+                          docker stop wg-easy || true
+                          docker rm wg-easy || true
+                          
+                          # Update MTU for existing clients if any
+                          if [ -d /etc/wireguard/clients ]; then
+                            find /etc/wireguard/clients -name "*.conf" -exec sed -i 's/MTU = .*/MTU = 1280/' {} + || true
+                          fi
+                          # Fix ListenPort conflict if wg0.conf was generated previously with default port
+                          # wg-easy overwrites changes to wg0.conf, so we must delete it to force regeneration
+                          if grep -q "ListenPort = 51820" /etc/wireguard/wg0.conf 2>/dev/null; then
+                            rm -f /etc/wireguard/wg0.conf
+                          fi
+                          
+                          docker run -d \\
+                            --name=wg-easy \\
+                            --network host \\
+                            -e WG_HOST=${activeTunnel.vps1.ip} \\
+                            -e WG_PORT=51821 \\
+                            -e PORT=51822 \\
+                            -e PASSWORD_HASH='$2a$10$jB0akgOdR4cShIVoDFO3zuNvuk/IvmmdxbQKkNIYu8zOy363gdGXC' \\
+                            -e WG_DEFAULT_DNS=1.1.1.1 \\
+                            -e WG_DEFAULT_ADDRESS=10.8.0.x \\
+                            -e WG_MTU=1280 \\
+                            -e WG_ALLOWED_IPS=0.0.0.0/0 \\
+                            -v /etc/wireguard:/etc/wireguard \\
+                            --cap-add=NET_ADMIN \\
+                            --cap-add=SYS_MODULE \\
+                            --restart unless-stopped \\
+                            ghcr.io/wg-easy/wg-easy
+                        `);
+                        addLog("wg-easy restarted with correct MTU.", "success");
+
                         addLog("Manual configuration fix complete. Check tunnel status.", "success");
                       } catch (err: any) {
                         addLog(`Failed to fix configuration: ${err.message}`, "error");
@@ -4211,156 +4097,6 @@ PersistentKeepalive = 25`;
                 </div>
               </motion.div>
             )}
-            {activeTab === 'terminal' && (
-              <motion.div
-                key="terminal"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="space-y-8"
-              >
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <h2 className="text-2xl font-bold text-zinc-100 tracking-tight">Integrated Terminal</h2>
-                    <p className="text-sm text-zinc-500">Secure SSH access to your VPS nodes directly from the browser.</p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-4 gap-8">
-                  <div className="lg:col-span-1 space-y-4">
-                    <Card title="Select Session" icon={Server}>
-                      <div className="space-y-2">
-                        {[activeTunnel.vps1, activeTunnel.vps2].map((vps, i) => (
-                          <button
-                            key={i}
-                            onClick={() => setSelectedVpsIndex(i)}
-                            className={`w-full flex items-center justify-between p-3 border rounded-xl transition-all group ${
-                              selectedVpsIndex === i 
-                                ? 'bg-emerald-500/10 border-emerald-500' 
-                                : 'bg-zinc-950 border-zinc-800 hover:border-emerald-500/50'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <Terminal className="w-4 h-4 text-zinc-600 group-hover:text-emerald-500" />
-                              <span className="text-xs font-bold text-zinc-300">{i === 0 ? 'VPS1 (Gateway)' : 'VPS2 (Exit Node)'}</span>
-                            </div>
-                            <div className={`w-1.5 h-1.5 rounded-full ${vps.ip ? 'bg-emerald-500' : 'bg-zinc-700'}`} />
-                          </button>
-                        ))}
-                      </div>
-                    </Card>
-
-                    <Card title="Connection Settings" icon={Settings}>
-                      <div className="space-y-4">
-                        <div className="space-y-2">
-                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Username</label>
-                          <input 
-                            type="text" 
-                            readOnly
-                            value="root"
-                            className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-500 focus:outline-none"
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Auth Method</label>
-                          <select className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500">
-                            <option>Password</option>
-                          </select>
-                        </div>
-                        <button 
-                          onClick={connectTerminal}
-                          className="w-full py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all text-xs"
-                        >
-                          ESTABLISH CONNECTION
-                        </button>
-                      </div>
-                    </Card>
-
-                    <Card title="Paste & Send" icon={Copy}>
-                      <div className="space-y-3">
-                        <p className="text-[10px] text-zinc-500 uppercase tracking-widest font-bold">Quick Paste Buffer</p>
-                        <textarea 
-                          value={pasteBuffer}
-                          onChange={(e) => setPasteBuffer(e.target.value)}
-                          placeholder="Paste commands or scripts here..."
-                          className="w-full h-32 bg-zinc-950 border border-zinc-800 rounded-xl p-3 text-[10px] font-mono text-zinc-300 focus:outline-none focus:border-emerald-500/50 transition-all resize-none"
-                        />
-                        <button 
-                          onClick={() => {
-                            if (pasteBuffer.trim()) {
-                              executeCommand(pasteBuffer);
-                              setPasteBuffer('');
-                            }
-                          }}
-                          className="w-full py-2 bg-zinc-800 text-zinc-200 font-bold rounded-lg hover:bg-zinc-700 transition-all text-[10px] uppercase tracking-wider"
-                        >
-                          Send to Terminal
-                        </button>
-                      </div>
-                    </Card>
-                  </div>
-
-                  <div className="lg:col-span-3">
-                    <div className="bg-black border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col h-[600px]">
-                      <div className="px-6 py-3 bg-zinc-900 border-b border-zinc-800 flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="flex gap-1.5">
-                            <div className="w-2.5 h-2.5 rounded-full bg-red-500/20 border border-red-500/40" />
-                            <div className="w-2.5 h-2.5 rounded-full bg-amber-500/20 border border-amber-500/40" />
-                            <div className="w-2.5 h-2.5 rounded-full bg-emerald-500/20 border border-emerald-500/40" />
-                          </div>
-                          <span className="text-[10px] font-mono text-zinc-500 uppercase tracking-widest ml-4">
-                            root@{selectedVpsIndex === 0 ? activeTunnel.vps1.ip : activeTunnel.vps2.ip}:~
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-4">
-                          {isRotating && (
-                            <div className="flex items-center gap-2 px-2 py-0.5 bg-emerald-500/10 border border-emerald-500/20 rounded text-[9px] font-bold text-emerald-500">
-                              <Activity className="w-3 h-3 animate-spin" />
-                              ROTATING KEYS...
-                            </div>
-                          )}
-                          <span className="text-[10px] font-mono text-emerald-500 animate-pulse">CONNECTED</span>
-                          <button className="text-zinc-500 hover:text-zinc-300">
-                            <Download className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                      <div className="flex-1 p-0 font-mono text-sm overflow-hidden bg-[#0c0c0c]">
-                        <div ref={terminalRef} className="w-full h-full" />
-                      </div>
-                      <div className="px-6 py-3 bg-zinc-900 border-t border-zinc-800 flex items-center gap-4">
-                        <Terminal className="w-4 h-4 text-emerald-500" />
-                        <div className="flex-1 flex items-center gap-2">
-                          <input 
-                            type="text" 
-                            value={terminalInput}
-                            onChange={(e) => setTerminalInput(e.target.value)}
-                            placeholder="Type a command (e.g. ./lodgeguard-sync.sh)..."
-                            className="flex-1 bg-transparent border-none text-zinc-100 font-mono text-sm focus:outline-none"
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                executeCommand(terminalInput);
-                                setTerminalInput('');
-                              }
-                            }}
-                          />
-                          <button 
-                            onClick={() => {
-                              executeCommand(terminalInput || './lodgeguard-sync.sh');
-                              setTerminalInput('');
-                            }}
-                            className="px-3 py-1 bg-emerald-500/10 text-emerald-500 text-[10px] font-bold rounded border border-emerald-500/20 hover:bg-emerald-500/20 transition-all"
-                          >
-                            {terminalInput ? 'EXECUTE' : 'RUN SYNC'}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </motion.div>
-            )}
             {activeTab === 'peers' && (
               <motion.div
                 key="peers"
@@ -4458,22 +4194,25 @@ PersistentKeepalive = 25`;
 # Web UI: http://${activeTunnel.vps1.ip || '<VPS1_IP>'}:51822
 # Password: admin
 
+docker stop wg-easy || true
+docker rm wg-easy || true
+
 docker run -d \\
   --name=wg-easy \\
+  --network host \\
   -e WG_HOST=${activeTunnel.vps1.ip || '<VPS1_IP>'} \\
-  -e PASSWORD=admin \\
+  -e WG_PORT=51821 \\
+  -e PORT=51822 \\
+  -e PASSWORD_HASH='$2a$10$jB0akgOdR4cShIVoDFO3zuNvuk/IvmmdxbQKkNIYu8zOy363gdGXC' \\
   -e WG_DEFAULT_DNS=1.1.1.1 \\
   -e WG_DEFAULT_ADDRESS=10.8.0.x \\
+  -e WG_MTU=1280 \\
   -e WG_ALLOWED_IPS=0.0.0.0/0 \\
-  -v ~/.wg-easy:/etc/wireguard \\
-  -p 51821:51820/udp \\
-  -p 51822:51821/tcp \\
+  -v /etc/wireguard:/etc/wireguard \\
   --cap-add=NET_ADMIN \\
   --cap-add=SYS_MODULE \\
-  --sysctl="net.ipv4.conf.all.src_valid_mark=1" \\
-  --sysctl="net.ipv4.ip_forward=1" \\
   --restart unless-stopped \\
-  weejewel/wg-easy`}
+  ghcr.io/wg-easy/wg-easy`}
                         </pre>
                       </div>
                       <div className="relative group">
@@ -4507,8 +4246,8 @@ PersistentKeepalive = 25`}
 PrivateKey = <VPS2_PRIVATE_KEY>
 Address = 10.9.0.2/24
 ListenPort = 51820
-PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o <DEFAULT_IFACE> -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o <DEFAULT_IFACE> -j MASQUERADE || true
+PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o <DEFAULT_IFACE> -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o <DEFAULT_IFACE> -j MASQUERADE || true
 
 [Peer]
 PublicKey = <VPS1_PUBLIC_KEY>

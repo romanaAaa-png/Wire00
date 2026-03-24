@@ -2,7 +2,6 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { Client } from "ssh2";
-import { WebSocketServer } from "ws";
 
 async function startServer() {
   const app = express();
@@ -109,72 +108,6 @@ async function startServer() {
 
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
-  });
-
-  // WebSocket Server for Terminal
-  const wss = new WebSocketServer({ server, path: "/terminal" });
-
-  wss.on("connection", (ws) => {
-    console.log("[WS] New terminal connection");
-    const conn = new Client();
-    let shellStream: any = null;
-
-    ws.on("message", (message: Buffer) => {
-      try {
-        const data = JSON.parse(message.toString());
-        if (data.type === "connect") {
-          const { host, port, username, password, privateKey } = data.config;
-          console.log(`[WS] Connecting to ${host}...`);
-          conn
-            .on("ready", () => {
-              console.log(`[WS] Connection ready for ${host}`);
-              conn.shell({ term: 'xterm-256color' }, (err, stream) => {
-                if (err) {
-                  ws.send(JSON.stringify({ type: "error", message: err.message }));
-                  return;
-                }
-                shellStream = stream;
-                stream.on("data", (chunk: Buffer) => {
-                  ws.send(JSON.stringify({ type: "data", data: chunk.toString() }));
-                });
-                stream.on("close", () => {
-                  console.log(`[WS] Shell closed for ${host}`);
-                  conn.end();
-                  ws.close();
-                });
-              });
-            })
-            .on("error", (err) => {
-              console.error(`[WS] SSH Error for ${host}: ${err.message}`);
-              ws.send(JSON.stringify({ type: "error", message: err.message }));
-            })
-            .connect({
-              host,
-              port: port || 22,
-              username,
-              password,
-              privateKey,
-              readyTimeout: 20000,
-            });
-        } else if (data.type === "data") {
-          if (shellStream) {
-            shellStream.write(data.data);
-          }
-        } else if (data.type === "resize") {
-          if (shellStream) {
-            shellStream.setWindow(data.rows, data.cols, data.height, data.width);
-          }
-        }
-      } catch (err: any) {
-        console.error("[WS] Message error:", err.message);
-      }
-    });
-
-    ws.on("close", () => {
-      console.log("[WS] Terminal connection closed");
-      if (shellStream) shellStream.end();
-      conn.end();
-    });
   });
 }
 
