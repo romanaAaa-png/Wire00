@@ -2,6 +2,8 @@
   "name": "double-tunnel",
   "private": true,
   "version": "0.0.0",
+  "description": "Double Tunnel VPN Application",
+  "author": "Double Tunnel Team",
   "type": "module",
   "main": "electron/main.ts",
   "build": {
@@ -13,7 +15,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "defaultInstallationDir": "C:\\Program Files\\DoubleTunnel"
+      "perMachine": true
     }
   },
   "scripts": {
