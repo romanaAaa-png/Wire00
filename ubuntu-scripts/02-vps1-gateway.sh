@@ -1,130 +1,202 @@
 #!/bin/bash
-# ==============================================================================
-# VPS1 (Gateway) Setup Script
-# Run this on VPS1 as root.
-# ==============================================================================
+# VPS1 Setup Script (Gateway)
+# This script configures VPS1 as the entry point for clients (via wg-easy)
+# and routes all client traffic through VPS2.
+# Standardized to use wg0 for clients and wg1 for the tunnel to VPS2.
 
-set -e
+set -ex
 
-# Ensure script is run as root
-if [ "$EUID" -ne 0 ]; then
-  echo "Please run as root"
-  exit 1
-fi
+# --- Configuration Variables ---
+# You can edit these or the script will try to detect them
+VPS1_IP="${1:-$(curl -s https://ifconfig.me)}"
+VPS2_IP="${2:-YOUR_VPS2_IP}"
+WG_EASY_PORT="${3:-51821}"
+WG_EASY_UI_PORT="${4:-51822}"
+WG_INTER_VPS_PORT="${5:-51820}"
+WG_EXIT_PORT="${6:-51820}"
+# -------------------------------
 
-echo "[*] Updating system and installing dependencies..."
-apt-get update
-apt-get install -y wireguard iptables iproute2 curl
+# Logging setup
+LOG_DIR="/root/DTLogs"
+LOG_FILE="$LOG_DIR/installation.txt"
+mkdir -p "$LOG_DIR"
 
-echo "[*] Installing Docker (if not present)..."
-if ! command -v docker &> /dev/null; then
-    curl -fsSL https://get.docker.com -o get-docker.sh
-    sh get-docker.sh
-    rm get-docker.sh
-fi
+log_step() {
+  local action="$1"
+  local message="$2"
+  echo "[$(date)] [$action] $message" >> "$LOG_FILE"
+  echo "[$action] $message"
+}
 
-echo "[*] Enabling IP Forwarding..."
-sed -i '/net.ipv4.ip_forward/d' /etc/sysctl.conf
-echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-sysctl -p
+do_prepare() {
+  log_step "prepare" "--- Starting VPS1 Preparation Phase ---"
+  
+  fix_apt() {
+    log_step "prepare" "Fixing package manager (apt)..."
+    rm -f /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock || true
+    dpkg --configure -a || true
+    apt-get update || true
+  }
 
-echo "[*] Generating WireGuard keys for VPS1..."
-mkdir -p /etc/wireguard
-chmod 700 /etc/wireguard
+  fix_apt
+  export DEBIAN_FRONTEND=noninteractive
+  export NEEDRESTART_MODE=a
 
-if [ ! -f /etc/wireguard/private.key ]; then
-    wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/public.key
-fi
-chmod 600 /etc/wireguard/private.key
-
-VPS1_PRIV=$(cat /etc/wireguard/private.key)
-VPS1_PUB=$(cat /etc/wireguard/public.key)
-VPS1_IP=$(curl -s -4 ifconfig.me)
-
-echo ""
-echo "================================================================="
-echo " VPS1 PUBLIC KEY: $VPS1_PUB"
-echo " VPS1 PUBLIC IP:  $VPS1_IP"
-echo "================================================================="
-echo ""
-echo "Please enter the VPS2 Public Key (from the VPS2 script):"
-read -p "VPS2 Public Key: " VPS2_PUB
-
-echo "Please enter the VPS2 IP Address:"
-read -p "VPS2 IP Address: " VPS2_IP
-
-if [ -z "$VPS2_PUB" ] || [ -z "$VPS2_IP" ]; then
-    echo "Error: VPS2 Public Key and IP Address cannot be empty."
+  log_step "prepare" "Installing Docker, WireGuard Tools & SSH Tools..."
+  apt-get update
+  apt-get install -y -o Dpkg::Options::="--force-confnew" ca-certificates curl gnupg wireguard wireguard-tools iptables iproute2 sshpass
+  
+  if ! command -v wg &> /dev/null; then
+    log_step "prepare" "ERROR: wireguard-tools installation failed. 'wg' command not found."
     exit 1
-fi
+  fi
+  
+  # Docker Installation
+  if ! command -v docker &> /dev/null; then
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc || true
+    chmod a+r /etc/apt/keyrings/docker.asc || true
+    echo "Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: \$(. /etc/os-release && echo \"\${UBUNTU_CODENAME:-\$VERSION_CODENAME}\")
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.sources > /dev/null || true
+    apt-get update || true
+    apt-get install -y -o Dpkg::Options::="--force-confnew" docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin || true
+  fi
 
-echo "[*] Creating /etc/wireguard/wg1.conf (Tunnel to VPS2)..."
-cat <<EOF > /etc/wireguard/wg1.conf
+  systemctl enable docker || true
+  systemctl start docker || true
+
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg1)..."
+  mkdir -p /etc/wireguard
+  if [ ! -s /etc/wireguard/wg1.key ] || [ ! -s /etc/wireguard/wg1.pub ]; then
+    wg genkey > /etc/wireguard/wg1.key
+    wg pubkey < /etc/wireguard/wg1.key > /etc/wireguard/wg1.pub
+  fi
+  echo "RESULT_WG1_PUB_KEY: $(cat /etc/wireguard/wg1.pub)"
+  
+  if [ -f /var/run/reboot-required ]; then
+    log_step "prepare" "System requires a reboot. Marking for reboot..."
+    echo "REBOOT_REQUIRED"
+  fi
+  
+  log_step "prepare" "--- VPS1 Preparation Phase Complete ---"
+}
+
+do_configure() {
+  PEER_PUB="$1"
+  if [ -z "$PEER_PUB" ]; then
+    if [ -f /etc/wireguard/peer_wg0.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg0.pub)
+    else
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg0.pub."
+      echo "Usage: $0 configure [PEER_PUBLIC_KEY]"
+      exit 1
+    fi
+  fi
+
+  log_step "configure" "--- Starting VPS1 Configuration Phase ---"
+  
+  # 2. Setup WG-Easy (Client Gateway)
+  log_step "configure" "Cleaning up previous installations..."
+  systemctl stop wg-quick@wg0 wg-quick@wg1 2>/dev/null || true
+  if command -v docker &> /dev/null; then
+    docker stop wg-easy 2>/dev/null || true
+    docker rm wg-easy 2>/dev/null || true
+  fi
+
+  log_step "configure" "Configuring WG-Easy in /etc/wireguard..."
+  mkdir -p /etc/wireguard
+  cat <<EOF > /etc/wireguard/docker-compose.yml
+services:
+  wg-easy:
+    environment:
+      - WG_HOST=$VPS1_IP
+      - WG_MTU=1280
+      - PASSWORD=admin123
+      - WG_DEFAULT_DNS=1.1.1.1
+      - WG_ALLOWED_IPS=0.0.0.0/0
+      - WG_PORT=$WG_EASY_PORT
+      - PORT=$WG_EASY_UI_PORT
+    image: ghcr.io/wg-easy/wg-easy
+    container_name: wg-easy
+    network_mode: "host"
+    volumes:
+      - .:/etc/wireguard
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+EOF
+  cd /etc/wireguard && docker compose up -d
+
+  log_step "configure" "Enabling IP Forwarding..."
+  sysctl -w net.ipv4.ip_forward=1 || true
+  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+  sysctl -p /etc/sysctl.d/99-wireguard.conf || true
+
+  # 4. Setup VPS-to-VPS Tunnel (wg1)
+  log_step "configure" "Configuring VPS-to-VPS Tunnel (wg1) with Peer Key: $PEER_PUB"
+  if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
+    echo "200 vpn" >> /etc/iproute2/rt_tables
+  fi
+
+  PRIV_KEY=$(cat /etc/wireguard/wg1.key)
+  PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
+  PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
+
+  cat <<EOF > /etc/wireguard/wg1.conf
 [Interface]
-PrivateKey = $VPS1_PRIV
+PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
-ListenPort = 51820
+ListenPort = $WG_INTER_VPS_PORT
+MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
+
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
+PostUp = ip route add 10.9.0.0/24 dev %i || true
+PostUp = ip route add default dev %i table 200 || true
+PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
+PostUp = ip rule add from 10.0.0.0/24 table 200 priority 10 || true
+PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
+PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o wg0 -j ACCEPT || true
+PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+
+PreDown = ip route del 10.9.0.0/24 dev %i || true
+PreDown = ip route del default dev %i table 200 || true
+PreDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true
+PreDown = ip rule del from 10.0.0.0/24 table 200 priority 10 || true
+PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
+PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
+PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
+PreDown = iptables -D FORWARD -o wg0 -j ACCEPT || true
+PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
+PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
-PublicKey = $VPS2_PUB
-Endpoint = $VPS2_IP:51820
+PublicKey = $PEER_PUB
+Endpoint = $VPS2_IP:$WG_EXIT_PORT
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
-chmod 600 /etc/wireguard/wg1.conf
+  log_step "configure" "Starting WireGuard wg1..."
+  systemctl enable wg-quick@wg1 || true
+  systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
 
-echo "[*] Starting WireGuard interface wg1..."
-systemctl enable wg-quick@wg1
-systemctl restart wg-quick@wg1
+  log_step "configure" "--- VPS1 Configuration Phase Complete ---"
+}
 
-echo "[*] Starting WG-Easy (Client VPN Gateway)..."
-docker stop wg-easy 2>/dev/null || true
-docker rm wg-easy 2>/dev/null || true
-
-# Pre-hashed password for 'admin'
-ADMIN_HASH='$2a$10$jB0akgOdR4cShIVoDFO3zuNvuk/IvmmdxbQKkNIYu8zOy363gdGXC'
-
-docker run -d \
-  --name=wg-easy \
-  --network host \
-  -e WG_HOST=$VPS1_IP \
-  -e WG_PORT=51821 \
-  -e PORT=51822 \
-  -e PASSWORD_HASH="$ADMIN_HASH" \
-  -e WG_DEFAULT_DNS=1.1.1.1 \
-  -e WG_DEFAULT_ADDRESS=10.8.0.x \
-  -e WG_MTU=1280 \
-  -e WG_ALLOWED_IPS=0.0.0.0/0 \
-  -v /etc/wireguard:/etc/wireguard \
-  --cap-add=NET_ADMIN \
-  --cap-add=SYS_MODULE \
-  --restart unless-stopped \
-  ghcr.io/wg-easy/wg-easy
-
-echo ""
-echo "[+] VPS1 Setup Complete!"
-echo "[+] WG-Easy Web UI: http://$VPS1_IP:51822"
-echo "[+] Default Password: admin"
-echo ""
-echo "================================================================="
-echo " WG Easy UI Configuration Details"
-echo "================================================================="
-echo " Public Key: $VPS1_PUB"
-echo " Endpoint: $VPS1_IP:51820"
-echo " Allowed IPs: 0.0.0.0/0"
-echo "================================================================="
-echo "[+] You can now log in to the Web UI, create clients, and connect."
-
-echo ""
-echo "[*] Verifying tunnel connectivity..."
-if ping -c 3 10.9.0.2 &> /dev/null; then
-    echo "[+] Tunnel is UP! Successfully pinged VPS2 (10.9.0.2) through the WireGuard tunnel."
-else
-    echo "[-] Tunnel verification failed. Could not ping VPS2 (10.9.0.2)."
-    echo "    Please check your configuration, keys, and ensure UDP port 51820 is open on VPS2."
-fi
-
+case "$1" in
+  prepare) do_prepare ;;
+  configure) do_configure "$2" ;;
+  *) echo "Usage: $0 {prepare|configure} [peer_pub]"; exit 1 ;;
+esac
