@@ -29,7 +29,7 @@ async function startServer() {
     let errorOutput = "";
     let hasResponded = false;
 
-    const sendResponse = (status: number, data: any) => {
+    const sendResponse = (status: number, data: unknown) => {
       if (!hasResponded) {
         hasResponded = true;
         res.status(status).json(data);
@@ -106,7 +106,7 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }

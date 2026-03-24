@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   Shield, 
   Server, 
@@ -48,9 +48,9 @@ import { cn } from './lib/utils';
 declare global {
   interface Window {
     electron?: {
-      sshExecute: (config: any) => Promise<any>;
-      send: (channel: string, data: any) => void;
-      receive: (channel: string, func: (...args: any[]) => void) => void;
+      sshExecute: (config: unknown) => Promise<unknown>;
+      send: (channel: string, data: unknown) => void;
+      receive: (channel: string, func: (...args: unknown[]) => void) => void;
       readFile: (filePath: string) => Promise<{ data?: string; error?: string }>;
       selectFile: () => Promise<string | null>;
       writeFile: (filePath: string, data: string) => Promise<{ success: boolean; error?: string }>;
@@ -113,7 +113,7 @@ interface Script {
   description: string;
   content: string;
   rollbackContent?: string;
-  icon?: any;
+  icon?: React.ElementType;
 }
 
 interface PortForwardRule {
@@ -202,7 +202,7 @@ const INITIAL_PORT_RULES: PortForwardRule[] = [
 
 // --- Components ---
 
-const Card = ({ children, className, title, icon: Icon }: { children: React.ReactNode, className?: string, title?: string, icon?: any, key?: React.Key }) => (
+const Card = ({ children, className, title, icon: Icon }: { children: React.ReactNode, className?: string, title?: string, icon?: React.ElementType, key?: React.Key }) => (
   <div className={cn("bg-zinc-900 border border-zinc-800 rounded-xl overflow-hidden shadow-xl", className)}>
     {title && (
       <div className="px-6 py-4 border-b border-zinc-800 flex items-center gap-3 bg-zinc-900/50">
@@ -230,8 +230,79 @@ const Badge = ({ children, variant = 'default', className }: { children: React.R
   );
 };
 
+type AppTab = 'pre-setup' | 'overview' | 'peers' | 'port-forwarding' | 'scripts' | 'keys' | 'wg-keys' | 'deploy' | 'config' | 'setup' | 'platforms' | 'diagnostics' | 'uninstall';
+
+const INITIAL_PRE_SETUP_CONFIG = {
+  vps1Ip: '',
+  vps1Password: '',
+  vps2Ip: '',
+  vps2Password: '',
+  vps1Wg0Pub: '',
+  vps1Wg1Pub: '',
+  vps2Wg0Pub: '',
+  clientCount: 5,
+  clientNames: 'Client1, Client2, Client3, Client4, Client5',
+  setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
+};
+
+const parseIniContent = (data: string, currentConfig: typeof INITIAL_PRE_SETUP_CONFIG) => {
+  const lines = data.split(/\r?\n/);
+  const newConfig = { ...currentConfig };
+  let currentSection = '';
+  
+  lines.forEach(line => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine || trimmedLine.startsWith(';') || trimmedLine.startsWith('#')) return;
+
+    if (trimmedLine.startsWith('[') && trimmedLine.endsWith(']')) {
+      currentSection = trimmedLine.slice(1, -1).toUpperCase();
+      return;
+    }
+
+    const [key, ...valueParts] = trimmedLine.split('=');
+    const value = valueParts.join('=').trim();
+    const k = key.trim().toUpperCase();
+
+    if (currentSection === 'VPS1') {
+      if (k === 'IP') newConfig.vps1Ip = value;
+      if (k === 'PASSWORD') newConfig.vps1Password = value;
+      if (k === 'WG0_PUB') newConfig.vps1Wg0Pub = value;
+      if (k === 'WG1_PUB') newConfig.vps1Wg1Pub = value;
+    } else if (currentSection === 'VPS2') {
+      if (k === 'IP') newConfig.vps2Ip = value;
+      if (k === 'PASSWORD') newConfig.vps2Password = value;
+      if (k === 'WG0_PUB') newConfig.vps2Wg0Pub = value;
+    } else if (currentSection === 'WIREGUARD') {
+      if (k === 'CLIENTCOUNT') newConfig.clientCount = parseInt(value) || 5;
+      if (k === 'CLIENTNAMES') newConfig.clientNames = value;
+      if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
+      if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
+      if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
+    } else {
+      if (k === 'VPS1_IP') newConfig.vps1Ip = value;
+      if (k === 'VPS1_PASSWORD') newConfig.vps1Password = value;
+      if (k === 'VPS2_IP') newConfig.vps2Ip = value;
+      if (k === 'VPS2_PASSWORD') newConfig.vps2Password = value;
+      if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
+      if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
+      if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
+      if (k === 'CLIENT_COUNT') newConfig.clientCount = parseInt(value) || 5;
+      if (k === 'CLIENT_NAMES') newConfig.clientNames = value;
+    }
+  });
+  return newConfig;
+};
+
+interface SSHResult {
+  stdout?: string;
+  stderr?: string;
+  errorOutput?: string;
+  code?: number;
+  error?: string;
+}
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState<AppTab>('overview');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isTestingConfig, setIsTestingConfig] = useState(false);
   const cancelDeploymentRef = useRef(false);
@@ -246,7 +317,7 @@ export default function App() {
         } else {
           setBackendStatus('offline');
         }
-      } catch (err) {
+      } catch {
         setBackendStatus('offline');
       }
     };
@@ -256,11 +327,11 @@ export default function App() {
   const [vpsLogs, setVpsLogs] = useState<{vps: string, logs: string}[]>([]);
 
   useEffect(() => {
+    const originalWarn = console.warn;
     const originalLog = console.log;
     const originalError = console.error;
-    const originalWarn = console.warn;
 
-    const captureLog = (type: string, ...args: any[]) => {
+    const captureLog = (type: string, ...args: unknown[]) => {
       const message = args.map(arg => 
         typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
       ).join(' ');
@@ -1247,66 +1318,7 @@ pause
     targetVPS: 'vps1',
     description: ''
   });
-  const [preSetupConfig, setPreSetupConfig] = useState({
-    vps1Ip: '',
-    vps1Password: '',
-    vps2Ip: '',
-    vps2Password: '',
-    vps1Wg0Pub: '',
-    vps1Wg1Pub: '',
-    vps2Wg0Pub: '',
-    clientCount: 5,
-    clientNames: 'Client1, Client2, Client3, Client4, Client5',
-    setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
-  });
-
-  const parseIniContent = (data: string) => {
-    const lines = data.split(/\r?\n/);
-    const newConfig = { ...preSetupConfig };
-    let currentSection = '';
-    
-    lines.forEach(line => {
-      const trimmedLine = line.trim();
-      if (!trimmedLine || trimmedLine.startsWith(';') || trimmedLine.startsWith('#')) return;
-
-      if (trimmedLine.startsWith('[') && trimmedLine.endsWith(']')) {
-        currentSection = trimmedLine.slice(1, -1).toUpperCase();
-        return;
-      }
-
-      const [key, ...valueParts] = trimmedLine.split('=');
-      const value = valueParts.join('=').trim();
-      const k = key.trim().toUpperCase();
-
-      if (currentSection === 'VPS1') {
-        if (k === 'IP') newConfig.vps1Ip = value;
-        if (k === 'PASSWORD') newConfig.vps1Password = value;
-        if (k === 'WG0_PUB') newConfig.vps1Wg0Pub = value;
-        if (k === 'WG1_PUB') newConfig.vps1Wg1Pub = value;
-      } else if (currentSection === 'VPS2') {
-        if (k === 'IP') newConfig.vps2Ip = value;
-        if (k === 'PASSWORD') newConfig.vps2Password = value;
-        if (k === 'WG0_PUB') newConfig.vps2Wg0Pub = value;
-      } else if (currentSection === 'WIREGUARD') {
-        if (k === 'CLIENTCOUNT') newConfig.clientCount = parseInt(value) || 5;
-        if (k === 'CLIENTNAMES') newConfig.clientNames = value;
-        if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
-        if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
-        if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
-      } else {
-        if (k === 'VPS1_IP') newConfig.vps1Ip = value;
-        if (k === 'VPS1_PASSWORD') newConfig.vps1Password = value;
-        if (k === 'VPS2_IP') newConfig.vps2Ip = value;
-        if (k === 'VPS2_PASSWORD') newConfig.vps2Password = value;
-        if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
-        if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
-        if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
-        if (k === 'CLIENT_COUNT') newConfig.clientCount = parseInt(value) || 5;
-        if (k === 'CLIENT_NAMES') newConfig.clientNames = value;
-      }
-    });
-    return newConfig;
-  };
+  const [preSetupConfig, setPreSetupConfig] = useState(INITIAL_PRE_SETUP_CONFIG);
 
   useEffect(() => {
     const autoLoad = async () => {
@@ -1314,7 +1326,7 @@ pause
         try {
           const result = await window.electron.readFile(preSetupConfig.setupIniPath);
           if (result.data) {
-            const newConfig = parseIniContent(result.data);
+            const newConfig = parseIniContent(result.data, preSetupConfig);
             setPreSetupConfig(newConfig);
             updateActiveTunnel({
               vps1: { ...activeTunnel.vps1, ip: newConfig.vps1Ip, password: newConfig.vps1Password },
@@ -1322,12 +1334,13 @@ pause
             });
             addLog("Auto-loaded configuration from setup.ini", "success");
           }
-        } catch (e) {
+        } catch {
           console.log("Auto-load setup.ini skipped or failed.");
         }
       }
     };
     autoLoad();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadSetupIni = async () => {
@@ -1346,7 +1359,7 @@ pause
       }
 
       if (result.data) {
-        const newConfig = parseIniContent(result.data);
+        const newConfig = parseIniContent(result.data, preSetupConfig);
         setPreSetupConfig(newConfig);
         updateActiveTunnel({
           vps1: { 
@@ -1365,8 +1378,9 @@ pause
         });
         addLog("Configuration loaded successfully from setup.ini and applied to current project.", "success");
       }
-    } catch (err: any) {
-      addLog(`Failed to load setup.ini: ${err.message}`, "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addLog(`Failed to load setup.ini: ${message}`, "error");
     }
   };
 
@@ -1395,8 +1409,9 @@ pause
       } else {
         alert(`Failed to apply exclusion: ${result.error}`);
       }
-    } catch (err: any) {
-      alert(`Error: ${err.message}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      alert(`Error: ${message}`);
     }
   };
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
@@ -1536,19 +1551,20 @@ ClientNames=${preSetupConfig.clientNames}
       } else {
         addLog(`Error saving setup.ini: ${result.error}`, "error");
       }
-    } catch (err: any) {
-      addLog(`Failed to save setup.ini: ${err.message}`, "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addLog(`Failed to save setup.ini: ${message}`, "error");
     }
   };
 
-  const updateActiveTunnel = (updates: Partial<Tunnel>) => {
+  const updateActiveTunnel = useCallback((updates: Partial<Tunnel>) => {
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, ...updates } : t));
-  };
+  }, [activeTunnelId]);
 
-  const addLog = (msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info', vps?: 'vps1' | 'vps2' | 'exchange') => {
+  const addLog = useCallback((msg: string, type: 'info' | 'success' | 'error' | 'cmd' = 'info', vps?: 'vps1' | 'vps2' | 'exchange') => {
     const timestamp = new Date().toLocaleTimeString([], { hour12: false });
     setTunnels(prev => prev.map(t => t.id === activeTunnelId ? { ...t, logs: [...t.logs, { msg, type, vps, timestamp }] } : t));
-  };
+  }, [activeTunnelId]);
 
   const sshExecute = async (vps: VPSConfig, command: string) => {
     try {
@@ -1561,7 +1577,7 @@ ClientNames=${preSetupConfig.clientNames}
           username: vps.user,
           password: vps.password,
           command
-        });
+        }) as SSHResult;
         if (result.error) {
           throw new Error(result.error);
         }
@@ -1597,7 +1613,7 @@ ClientNames=${preSetupConfig.clientNames}
           try {
             const errorData = await response.json();
             errorMessage = errorData.error || errorMessage;
-          } catch (e) {
+          } catch {
             errorMessage = `HTTP Error ${response.status}: ${response.statusText}`;
           }
           throw new Error(errorMessage);
@@ -1610,14 +1626,14 @@ ClientNames=${preSetupConfig.clientNames}
           errorOutput: data.errorOutput || data.stderr || "",
           code: data.code ?? 0
         };
-      } catch (err: any) {
+      } catch (err) {
         clearTimeout(timeoutId);
-        if (err.name === 'AbortError') {
+        if (err instanceof Error && err.name === 'AbortError') {
           throw new Error(`SSH Request Timed Out (${vps.ip})`);
         }
         throw err;
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error(`SSH Execution Error on ${vps.ip}:`, error);
       throw error; // Let the caller handle it
     }
@@ -1661,7 +1677,7 @@ ClientNames=${preSetupConfig.clientNames}
       // If we are getting wg1 from vps1, it might have been pushed to vps2 as peer_wg1.pub
       // If we are getting wg0 from vps2, it might have been pushed to vps1 as peer_wg0.pub
       const otherVps = vps.ip === activeTunnel.vps1.ip ? activeTunnel.vps2 : activeTunnel.vps1;
-      let res3 = await sshExecute(otherVps, `cat /etc/wireguard/peer_${iface}.pub`);
+      const res3 = await sshExecute(otherVps, `cat /etc/wireguard/peer_${iface}.pub`);
       key = extractKey(res3.stdout);
       if (res3.code === 0 && key) {
         console.warn(`Method 4 (peer file) succeeded for ${iface} on ${vps.ip}`);
@@ -1669,8 +1685,9 @@ ClientNames=${preSetupConfig.clientNames}
       }
 
       throw new Error(`Could not retrieve public key for ${iface}. Cat error: ${errorMsg1}. WG show error: ${errorMsg2}.`);
-    } catch (e: any) {
-      addLog(`Key Retrieval Error (${iface}): ${e.message}`, "error", vps.ip === activeTunnel.vps1.ip ? 'vps1' : 'vps2');
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      addLog(`Key Retrieval Error (${iface}): ${message}`, "error", vps.ip === activeTunnel.vps1.ip ? 'vps1' : 'vps2');
       throw e;
     }
   };
@@ -1694,7 +1711,7 @@ ClientNames=${preSetupConfig.clientNames}
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
     addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info", "exchange");
 
-    let currentTunnel = { ...activeTunnel };
+    const currentTunnel = { ...activeTunnel };
 
     try {
       const checkCancel = () => {
@@ -1894,13 +1911,14 @@ EOF
       updateActiveTunnel({ status: 'deployed' });
       addLog("Double VPN Deployment Successful!", "success", "exchange");
       // setIsDeploying(false);
-      setActiveTab("vps1");
+      setActiveTab("overview");
 
-    } catch (error: any) {
-      if (error.message === 'Deployment Cancelled') {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === 'Deployment Cancelled') {
         addLog("Deployment was cancelled by the user.", "error", "exchange");
       } else {
-        addLog(`Deployment Failed: ${error.message}`, "error", "exchange");
+        addLog(`Deployment Failed: ${message}`, "error", "exchange");
       }
       updateActiveTunnel({ status: 'failed' });
       // setIsDeploying(false);
@@ -1913,7 +1931,7 @@ EOF
     addLog("--- Starting VPS Readiness Check ---", "info");
 
     // Use a local object to track state
-    let currentTunnel = { ...activeTunnel };
+    const currentTunnel = { ...activeTunnel };
 
     try {
       // Find the vps-check script
@@ -1926,7 +1944,7 @@ EOF
 
       // Test VPS1
       addLog(`Testing VPS1 Gateway (${currentTunnel.vps1.ip})...`, "info", "vps1");
-      let vps1CheckScript = checkScript.content.replaceAll('__VPS1_IP__', currentTunnel.vps1.ip)
+      const vps1CheckScript = checkScript.content.replaceAll('__VPS1_IP__', currentTunnel.vps1.ip)
                                                .replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
                                                .replaceAll('__WG_EASY_PORT__', (currentTunnel.vps1.ports?.['WG_EASY_PORT'] || 51820).toString())
                                                .replaceAll('__WG_EASY_UI_PORT__', (currentTunnel.vps1.ports?.['WG_EASY_UI_PORT'] || 51821).toString())
@@ -1944,7 +1962,7 @@ EOF
 
       // Test VPS2
       addLog(`Testing VPS2 Exit Node (${currentTunnel.vps2.ip})...`, "info", "vps2");
-      let vps2CheckScript = checkScript.content.replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
+      const vps2CheckScript = checkScript.content.replaceAll('__VPS2_IP__', currentTunnel.vps2.ip)
                                                .replaceAll('__WG_EXIT_PORT__', (currentTunnel.vps2.ports?.['WG_EXIT_PORT'] || 51820).toString())
                                                .replaceAll('__WG_EASY_PORT__', '51820')
                                                .replaceAll('__WG_EASY_UI_PORT__', '51821')
@@ -1960,8 +1978,9 @@ EOF
       }
 
       addLog("--- VPS Readiness Check Complete ---", "info");
-    } catch (err: any) {
-      addLog(`Readiness Check Error: ${err.message}`, "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addLog(`Readiness Check Error: ${message}`, "error");
     } finally {
       setIsTestingConfig(false);
     }
@@ -1984,8 +2003,9 @@ EOF
       } else {
         addLog(`${script.title} failed: ${res.errorOutput}`, "error");
       }
-    } catch (err: any) {
-      addLog(`Automation Error: ${err.message}`, "error");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      addLog(`Automation Error: ${message}`, "error");
     } finally {
       setIsRotating(false);
     }
@@ -2263,7 +2283,7 @@ PersistentKeepalive = 25`;
           ].map((item) => (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id as any)}
+              onClick={() => setActiveTab(item.id as AppTab)}
               className={cn(
                 "w-full flex items-center rounded-lg transition-all duration-200 group relative",
                 isSidebarCollapsed ? "justify-center p-3" : "gap-2.5 px-3 py-2",
@@ -2438,8 +2458,9 @@ PersistentKeepalive = 25`;
                                 } else {
                                   addLog(`VPS1 Connection Failed: ${res.stderr}`, "error", "vps1");
                                 }
-                              } catch (err: any) {
-                                addLog(`VPS1 Connection Error: ${err.message}`, "error", "vps1");
+                              } catch (err) {
+                                const message = err instanceof Error ? err.message : String(err);
+                                addLog(`VPS1 Connection Error: ${message}`, "error", "vps1");
                               }
                             }}
                             className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-widest"
@@ -2487,8 +2508,9 @@ PersistentKeepalive = 25`;
                                 } else {
                                   addLog(`VPS2 Connection Failed: ${res.stderr}`, "error", "vps2");
                                 }
-                              } catch (err: any) {
-                                addLog(`VPS2 Connection Error: ${err.message}`, "error", "vps2");
+                              } catch (err) {
+                                const message = err instanceof Error ? err.message : String(err);
+                                addLog(`VPS2 Connection Error: ${message}`, "error", "vps2");
                               }
                             }}
                             className="text-[10px] font-bold text-emerald-500 hover:text-emerald-400 uppercase tracking-widest"
@@ -3343,8 +3365,9 @@ PersistentKeepalive = 25`;
                         addLog("wg-easy restarted with correct MTU.", "success");
 
                         addLog("Manual configuration fix complete. Check tunnel status.", "success");
-                      } catch (err: any) {
-                        addLog(`Failed to fix configuration: ${err.message}`, "error");
+                      } catch (err: unknown) {
+                        const message = err instanceof Error ? err.message : String(err);
+                        addLog(`Failed to fix configuration: ${message}`, "error");
                       }
                     }}
                     className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
@@ -3653,9 +3676,10 @@ PersistentKeepalive = 25`;
                                     updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
                                     addLog(`VPS1 Connection Failed: ${res.errorOutput}`, "error", "vps1");
                                   }
-                                } catch (err: any) {
+                                } catch (err: unknown) {
+                                  const message = err instanceof Error ? err.message : String(err);
                                   updateActiveTunnel({ vps1: { ...activeTunnel.vps1, connectionStatus: 'error' } });
-                                  addLog(`VPS1 Connection Error: ${err.message}`, "error", "vps1");
+                                  addLog(`VPS1 Connection Error: ${message}`, "error", "vps1");
                                 }
                               }}
                               className={cn(
@@ -3738,9 +3762,10 @@ PersistentKeepalive = 25`;
                                     updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
                                     addLog(`VPS2 Connection Failed: ${res.errorOutput}`, "error", "vps2");
                                   }
-                                } catch (err: any) {
+                                } catch (err: unknown) {
+                                  const message = err instanceof Error ? err.message : String(err);
                                   updateActiveTunnel({ vps2: { ...activeTunnel.vps2, connectionStatus: 'error' } });
-                                  addLog(`VPS2 Connection Error: ${err.message}`, "error", "vps2");
+                                  addLog(`VPS2 Connection Error: ${message}`, "error", "vps2");
                                 }
                               }}
                               className={cn(
@@ -5029,7 +5054,7 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                       <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Protocol</label>
                       <select 
                         value={newPortRule.protocol}
-                        onChange={(e) => setNewPortRule({ ...newPortRule, protocol: e.target.value as any })}
+                        onChange={(e) => setNewPortRule({ ...newPortRule, protocol: e.target.value as 'TCP' | 'UDP' })}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-zinc-200 focus:outline-none focus:border-emerald-500 transition-colors"
                       >
                         <option value="TCP">TCP</option>
@@ -5040,7 +5065,7 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                       <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Target VPS</label>
                       <select 
                         value={newPortRule.targetVPS}
-                        onChange={(e) => setNewPortRule({ ...newPortRule, targetVPS: e.target.value as any })}
+                        onChange={(e) => setNewPortRule({ ...newPortRule, targetVPS: e.target.value as 'vps1' | 'vps2' })}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-zinc-200 focus:outline-none focus:border-emerald-500 transition-colors"
                       >
                         <option value="vps1">VPS1 (Gateway)</option>
@@ -5117,7 +5142,7 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                       <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Protocol</label>
                       <select 
                         value={editingPortRule.protocol}
-                        onChange={(e) => setEditingPortRule({ ...editingPortRule, protocol: e.target.value as any })}
+                        onChange={(e) => setEditingPortRule({ ...editingPortRule, protocol: e.target.value as 'TCP' | 'UDP' })}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-zinc-200 focus:outline-none focus:border-emerald-500 transition-colors"
                       >
                         <option value="TCP">TCP</option>
@@ -5128,7 +5153,7 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                       <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Target VPS</label>
                       <select 
                         value={editingPortRule.targetVPS}
-                        onChange={(e) => setEditingPortRule({ ...editingPortRule, targetVPS: e.target.value as any })}
+                        onChange={(e) => setEditingPortRule({ ...editingPortRule, targetVPS: e.target.value as 'vps1' | 'vps2' })}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-3 text-zinc-200 focus:outline-none focus:border-emerald-500 transition-colors"
                       >
                         <option value="vps1">VPS1 (Gateway)</option>

@@ -22,7 +22,7 @@ function createWindow() {
   const setupIniPath = 'C:\\DoubleTunnel\\setup.ini';
   try {
     if (fs.existsSync(setupIniPath)) {
-      const setupIniContent = fs.readFileSync(setupIniPath, 'utf-8');
+      fs.readFileSync(setupIniPath, 'utf-8');
       console.log('setup.ini read successfully');
       // You can send this to the renderer via IPC if needed
     }
