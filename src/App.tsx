@@ -1771,6 +1771,8 @@ ClientNames=${preSetupConfig.clientNames}
       addLog("Step 2: VPS2 installing WireGuard & wg-easy...", "info", "vps2");
       await sshExecute(currentTunnel.vps2, `
         apt-get install -y wireguard wireguard-tools
+        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+        sysctl -p /etc/sysctl.d/99-wireguard.conf
         wg --version
         docker pull weejewel/wg-easy
       `);
