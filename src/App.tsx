@@ -611,25 +611,32 @@ ListenPort = __WG_INTER_VPS_PORT__
 MTU = 1280
 Table = off
 
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
 PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
-PostUp = ip rule add from 10.8.0.0/24 table 200 || true
-PostUp = ip rule add from 10.0.0.0/24 table 200 || true
-PostUp = ip rule add from 10.9.0.1 table 200 || true
+PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
+PostUp = ip rule add from 10.0.0.0/24 table 200 priority 10 || true
+PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
 PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
-PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
-PostUp = iptables -A FORWARD -o %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o wg0 -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 PreDown = ip route del 10.9.0.0/24 dev %i || true
 PreDown = ip route del default dev %i table 200 || true
-PreDown = ip rule del from 10.8.0.0/24 table 200 || true
-PreDown = ip rule del from 10.0.0.0/24 table 200 || true
-PreDown = ip rule del from 10.9.0.1 table 200 || true
+PreDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true
+PreDown = ip rule del from 10.0.0.0/24 table 200 priority 10 || true
+PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
 PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
 PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
+PreDown = iptables -D FORWARD -o wg0 -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
+PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = $PEER_PUB
@@ -789,12 +796,15 @@ Address = 10.9.0.254/24
 ListenPort = __WG_EXIT_PORT__
 MTU = 1280
 
-PostUp = iptables -A FORWARD -i %i -j ACCEPT || true
-PostUp = iptables -A FORWARD -o %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o $PRIMARY_IF -j MASQUERADE || true
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
 PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o $PRIMARY_IF -j MASQUERADE || true
+PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = $PEER_PUB
@@ -1804,31 +1814,32 @@ ClientNames=${preSetupConfig.clientNames}
       `);
       addLog("Step 10 Complete: VPS2 received VPS1 public key.", "success", "exchange");
 
-      // Step 11: VPS1 connects to VPS2 to configure wg2.conf
+      // Step 11: VPS1 connects to VPS2 to configure wg0.conf
       checkCancel();
-      addLog("Step 11: VPS1 configuring wg2.conf on VPS2...", "info", "exchange");
+      addLog("Step 11: VPS1 configuring wg0.conf on VPS2...", "info", "exchange");
       await sshExecute(currentTunnel.vps1, `
         sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip} "
           PRIV_KEY=\\$(cat /etc/wireguard/private.key)
           PEER_PUB=\\\$(cat /etc/wireguard/wgpub1.key)
           DEFAULT_IFACE=\\$(ip route ls default | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
           if [ -z "\\$DEFAULT_IFACE" ]; then DEFAULT_IFACE="eth0"; fi
-          cat > /etc/wireguard/wg2.conf << EOF
+          cat > /etc/wireguard/wg0.conf << EOF
 [Interface]
 PrivateKey = \\$PRIV_KEY
 Address = 10.9.0.2/24
 ListenPort = 51820
-PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE || true
+MTU = 1280
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT; iptables -I FORWARD 1 -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i %i -j ACCEPT || true; iptables -D FORWARD -o %i -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
-          echo 'wg2.conf created on VPS2.'
+          echo 'wg0.conf created on VPS2.'
         "
       `);
-      addLog("Step 11 Complete: wg2.conf created on VPS2.", "success", "exchange");
+      addLog("Step 11 Complete: wg0.conf created on VPS2.", "success", "exchange");
 
       // Step 12: VPS2 connects to VPS1 to configure wg1.conf
       checkCancel();
@@ -1842,9 +1853,10 @@ EOF
 PrivateKey = \$PRIV_KEY
 Address = 10.9.0.1/24
 ListenPort = 51820
+MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -1895,7 +1907,7 @@ EOF
           ghcr.io/wg-easy/wg-easy
       `);
 
-      await sshExecute(currentTunnel.vps2, "systemctl enable wg-quick@wg2 && systemctl restart wg-quick@wg2");
+      await sshExecute(currentTunnel.vps2, "systemctl enable wg-quick@wg0 && systemctl restart wg-quick@wg0");
       await sshExecute(currentTunnel.vps1, "systemctl enable wg-quick@wg1 && systemctl restart wg-quick@wg1");
       
       addLog("Verifying secure tunnel (VPS1 pinging VPS2)...", "info", "exchange");
@@ -3302,14 +3314,15 @@ PersistentKeepalive = 25`;
 PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.2/24
 ListenPort = 51820
-PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -A FORWARD -o wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -D FORWARD -o wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE || true
+MTU = 1280
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT; iptables -I FORWARD 1 -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = iptables -D FORWARD -i %i -j ACCEPT || true; iptables -D FORWARD -o %i -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps1.wg1PublicKey || ''}
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`;
 
-                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg2.conf && systemctl restart wg-quick@wg2 || wg-quick up wg2`);
+                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg0.conf && systemctl restart wg-quick@wg0 || wg-quick up wg0`);
                         addLog("VPS2 configuration fixed and restarted.", "success");
 
                         // Fix VPS1 (Gateway)
@@ -3317,9 +3330,10 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`;
 PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.1/24
 ListenPort = 51820
+MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.0.0.0/24 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.0.0.0/24 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = ${activeTunnel.vps2.wg0PublicKey || ''}
