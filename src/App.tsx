@@ -306,8 +306,13 @@ export default function App() {
       }
     };
 
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      xtermRef.current?.writeln(`\r\n\x1b[1;31m[WebSocket ERROR] Connection failed. Please check network or proxy settings.\x1b[0m`);
+    };
+
     ws.onclose = () => {
-      xtermRef.current?.writeln('\r\n\x1b[1;31m[SESSION CLOSED]\x1b[0m');
+      xtermRef.current?.writeln('\r\n\x1b[1;33m[SESSION CLOSED]\x1b[0m');
     };
   };
 
@@ -1980,7 +1985,7 @@ PrivateKey = \\$PRIV_KEY
 Address = 10.9.0.2/24
 ListenPort = 51820
 PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE
-PostDown = iptables -D FORWARD -i wg2 -j ACCEPT; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -2005,8 +2010,8 @@ Address = 10.9.0.1/24
 ListenPort = 51820
 FwMark = 51820
 Table = off
-PostUp = ip rule add not fwmark 51820 table 51820; ip route add default dev wg1 table 51820; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
-PostDown = ip rule del not fwmark 51820 table 51820; ip route del default dev wg1 table 51820; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE
+PostUp = ip rule add from ${currentTunnel.vps1.ip} table main priority 10; ip rule add table main suppress_prefixlength 0 priority 20; ip rule add not fwmark 51820 table 51820 priority 30; ip route add default dev wg1 table 51820 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
+PostDown = ip rule del from ${currentTunnel.vps1.ip} table main priority 10 || true; ip rule del table main suppress_prefixlength 0 priority 20 || true; ip rule del not fwmark 51820 table 51820 priority 30 || true; ip route del default dev wg1 table 51820 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
 
 [Peer]
 PublicKey = \\$PEER_PUB
@@ -2030,7 +2035,7 @@ EOF
       if (pingRes.code === 0) {
         addLog("Secure tunnel verified successfully!", "success", "exchange");
       } else {
-        addLog("Tunnel verification failed. Ping to 10.9.0.2 did not succeed.", "warn", "exchange");
+        addLog("Tunnel verification failed. Ping to 10.9.0.2 did not succeed.", "error", "exchange");
       }
 
       // Step 14: On VPS1 to configure wireguard for external peers interface
@@ -2061,14 +2066,14 @@ EOF
       `);
       addLog("Step 14 Complete: wg-easy started on VPS1.", "success", "vps1");
 
-      updateActiveTunnel({ status: 'active' });
+      updateActiveTunnel({ status: 'deployed' });
       addLog("Double VPN Deployment Successful!", "success", "exchange");
       setIsDeploying(false);
       setActiveTab("vps1");
 
     } catch (error: any) {
       if (error.message === 'Deployment Cancelled') {
-        addLog("Deployment was cancelled by the user.", "warn", "exchange");
+        addLog("Deployment was cancelled by the user.", "error", "exchange");
       } else {
         addLog(`Deployment Failed: ${error.message}`, "error", "exchange");
       }
@@ -2600,14 +2605,14 @@ PersistentKeepalive = 25`;
                 exit={{ opacity: 0, y: -10 }}
                 className="space-y-8"
               >
-                <div className="flex items-center justify-between mb-8">
+                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-8">
                   <div>
                     <h2 className="text-2xl font-bold text-zinc-100 tracking-tight">Pre-Setup Configuration</h2>
                     <p className="text-sm text-zinc-500">Generate an initial setup.ini file for automated deployments.</p>
                   </div>
                   <button 
                     onClick={downloadIni}
-                    className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                    className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20 whitespace-nowrap"
                   >
                     <Download className="w-5 h-5" />
                     <span>GENERATE SETUP.INI</span>
@@ -4364,23 +4369,15 @@ PersistentKeepalive = 25`;
                 exit={{ opacity: 0, y: -10 }}
                 className="space-y-6"
               >
-                <div className="flex items-center justify-between mb-8">
+                <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 mb-8">
                   <div>
                     <h2 className="text-2xl font-bold text-zinc-100 tracking-tight">Peer Management</h2>
                     <p className="text-sm text-zinc-500">Manage users and devices connected to VPS1 Gateway for {activeTunnel.name}.</p>
                   </div>
                   <div className="flex gap-3">
                     <button 
-                      onClick={downloadCleanupTool}
-                      className="flex items-center gap-2 px-6 py-3 bg-zinc-800 text-zinc-200 font-bold rounded-xl hover:bg-zinc-700 transition-all border border-zinc-700"
-                      title="Download Windows Cleanup Script to remove local WireGuard remnants"
-                    >
-                      <ShieldAlert className="w-5 h-5" />
-                      <span>PC CLEANUP TOOL</span>
-                    </button>
-                    <button 
                       onClick={() => setShowAddPeer(true)}
-                      className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20"
+                      className="flex items-center gap-2 px-6 py-3 bg-emerald-500 text-black font-bold rounded-xl hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20 whitespace-nowrap"
                     >
                       <Plus className="w-5 h-5" />
                       <span>ADD NEW PEER</span>
@@ -4455,30 +4452,45 @@ PersistentKeepalive = 25`;
                   <Card title="VPS1 (Gateway) - Double VPN Config" icon={Terminal}>
                     <div className="space-y-4">
                       <div className="relative group">
-                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg0.conf (Clients)</div>
+                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">Docker Container (wg-easy)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
-{`[Interface]
-PrivateKey = ${activeTunnel.vps1.wg0PrivateKey || '<VPS1_WG0_PRIV>'}
-Address = 10.0.0.1/24
-ListenPort = 51820
+{`# WG-Easy manages client connections
+# Web UI: http://${activeTunnel.vps1.ip || '<VPS1_IP>'}:51822
+# Password: admin
 
-# Route Client traffic to VPS2 Tunnel (wg1)
-PostUp = iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o wg1 -j MASQUERADE
-PostDown = iptables -t nat -D POSTROUTING -s 10.0.0.0/24 -o wg1 -j MASQUERADE
-
-# Client Peers managed by WG-Easy...`}
+docker run -d \\
+  --name=wg-easy \\
+  -e WG_HOST=${activeTunnel.vps1.ip || '<VPS1_IP>'} \\
+  -e PASSWORD=admin \\
+  -e WG_DEFAULT_DNS=1.1.1.1 \\
+  -e WG_DEFAULT_ADDRESS=10.8.0.x \\
+  -e WG_ALLOWED_IPS=0.0.0.0/0 \\
+  -v ~/.wg-easy:/etc/wireguard \\
+  -p 51821:51820/udp \\
+  -p 51822:51821/tcp \\
+  --cap-add=NET_ADMIN \\
+  --cap-add=SYS_MODULE \\
+  --sysctl="net.ipv4.conf.all.src_valid_mark=1" \\
+  --sysctl="net.ipv4.ip_forward=1" \\
+  --restart unless-stopped \\
+  weejewel/wg-easy`}
                         </pre>
                       </div>
                       <div className="relative group">
                         <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg1.conf (VPS2 Tunnel)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
-PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || '<VPS1_WG1_PRIV>'}
-Address = 10.8.0.1/24
+PrivateKey = <VPS1_PRIVATE_KEY>
+Address = 10.9.0.1/24
+ListenPort = 51820
+FwMark = 51820
+Table = off
+PostUp = ip rule add from ${activeTunnel.vps1.ip || '<VPS1_IP>'} table main priority 10; ip rule add table main suppress_prefixlength 0 priority 20; ip rule add not fwmark 51820 table 51820 priority 30; ip route add default dev wg1 table 51820 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE
+PostDown = ip rule del from ${activeTunnel.vps1.ip || '<VPS1_IP>'} table main priority 10 || true; ip rule del table main suppress_prefixlength 0 priority 20 || true; ip rule del not fwmark 51820 table 51820 priority 30 || true; ip route del default dev wg1 table 51820 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true
 
 [Peer]
-PublicKey = ${activeTunnel.vps2.wg0PublicKey || '<VPS2_PUB>'}
-Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51822
+PublicKey = <VPS2_PUBLIC_KEY>
+Endpoint = ${activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`}
                         </pre>
@@ -4489,20 +4501,18 @@ PersistentKeepalive = 25`}
                   <Card title="VPS2 (Exit Node) - Double VPN Config" icon={Terminal}>
                     <div className="space-y-4">
                       <div className="relative group">
-                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg0.conf (Inbound)</div>
+                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg2.conf (Inbound)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
-PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || '<VPS2_PRIV>'}
-Address = 10.8.0.254/24
-ListenPort = 51822
-
-# Exit Node Routing (Tunnel -> Internet)
-PostUp = iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
-PostDown = iptables -t nat -D POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE
+PrivateKey = <VPS2_PRIVATE_KEY>
+Address = 10.9.0.2/24
+ListenPort = 51820
+PostUp = iptables -A FORWARD -i wg2 -j ACCEPT; iptables -t nat -A POSTROUTING -o <DEFAULT_IFACE> -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg2 -j ACCEPT || true; iptables -t nat -D POSTROUTING -o <DEFAULT_IFACE> -j MASQUERADE || true
 
 [Peer]
-PublicKey = ${activeTunnel.vps1.wg1PublicKey || '<VPS1_WG1_PUB>'}
-AllowedIPs = 10.8.0.0/24`}
+PublicKey = <VPS1_PUBLIC_KEY>
+AllowedIPs = 10.9.0.1/32, 10.8.0.0/24`}
                         </pre>
                       </div>
                     </div>

@@ -119,16 +119,16 @@ async function startServer() {
     const conn = new Client();
     let shellStream: any = null;
 
-    ws.on("message", (message: string) => {
+    ws.on("message", (message: Buffer) => {
       try {
-        const data = JSON.parse(message);
+        const data = JSON.parse(message.toString());
         if (data.type === "connect") {
           const { host, port, username, password, privateKey } = data.config;
           console.log(`[WS] Connecting to ${host}...`);
           conn
             .on("ready", () => {
               console.log(`[WS] Connection ready for ${host}`);
-              conn.shell((err, stream) => {
+              conn.shell({ term: 'xterm-256color' }, (err, stream) => {
                 if (err) {
                   ws.send(JSON.stringify({ type: "error", message: err.message }));
                   return;
