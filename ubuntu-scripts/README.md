@@ -1,4 +1,4 @@
-# Ubuntu Setup Scripts for Double Tunnel
+# Ubuntu Setup Scripts for Double Tunnel v2.0.0
 
 This directory contains the latest setup scripts for configuring your VPS instances for the Double Tunnel VPN.
 
@@ -11,7 +11,38 @@ This directory contains the latest setup scripts for configuring your VPS instan
 
 ## How to use
 
-### On VPS2 (Exit Node)
+### Option 1: Interactive Setup (Recommended)
+The **`interactive-setup.sh`** script is the easiest way to manually configure your VPS. It will guide you through the process, generate keys, and ask for the peer's information.
+
+1.  **On VPS2 (Exit Node):**
+    ```bash
+    curl -O https://ais-dev-ee3mffqb4uxgmtykuty4vn-678364466913.europe-west2.run.app/ubuntu-scripts/interactive-setup.sh
+    chmod +x interactive-setup.sh
+    sudo ./interactive-setup.sh
+    ```
+    *   Choose **2** for VPS2.
+    *   Copy the **Public Key** it generates.
+    *   Keep this terminal open.
+
+2.  **On VPS1 (Gateway):**
+    ```bash
+    curl -O https://ais-dev-ee3mffqb4uxgmtykuty4vn-678364466913.europe-west2.run.app/ubuntu-scripts/interactive-setup.sh
+    chmod +x interactive-setup.sh
+    sudo ./interactive-setup.sh
+    ```
+    *   Choose **1** for VPS1.
+    *   Copy the **Public Key** it generates.
+    *   When asked for the peer key, paste the key from **VPS2**.
+    *   Enter the **Public IP of VPS2**.
+
+3.  **Back on VPS2:**
+    *   Answer **y** when asked if you have the other key.
+    *   Paste the key from **VPS1**.
+
+### Option 2: Step-by-Step Manual Installation
+If you prefer to use the individual scripts:
+
+#### On VPS2 (Exit Node)
 ```bash
 # 1. Check readiness
 bash vps-check.sh
@@ -42,8 +73,9 @@ bash 02-vps1-gateway.sh configure <VPS2_PUBLIC_KEY>
 ```
 
 ## Standardized Interfaces
-- **`wg0`**: Client interface (on VPS1) / Tunnel interface (on VPS2)
-- **`wg1`**: Tunnel interface (on VPS1)
+- **`wg-gate`**: Client interface (on VPS1, managed by wg-easy)
+- **`wg-tun1`**: Tunnel interface (on VPS1)
+- **`wg-tun2`**: Tunnel interface (on VPS2)
 
 ## Networking Fixes Included
 - **Loose Reverse Path Filtering (`rp_filter=2`)** for correct multi-hop routing.

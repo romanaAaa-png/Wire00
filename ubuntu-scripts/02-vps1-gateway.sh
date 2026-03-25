@@ -2,7 +2,7 @@
 # VPS1 Setup Script (Gateway)
 # This script configures VPS1 as the entry point for clients (via wg-easy)
 # and routes all client traffic through VPS2.
-# Standardized to use wg0 for clients and wg1 for the tunnel to VPS2.
+# Standardized to use wg-gate for clients and wg-tun1 for the tunnel to VPS2.
 
 set -ex
 
@@ -68,13 +68,13 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
   systemctl enable docker || true
   systemctl start docker || true
 
-  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg1)..."
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg-tun1)..."
   mkdir -p /etc/wireguard
-  if [ ! -s /etc/wireguard/wg1.key ] || [ ! -s /etc/wireguard/wg1.pub ]; then
-    wg genkey > /etc/wireguard/wg1.key
-    wg pubkey < /etc/wireguard/wg1.key > /etc/wireguard/wg1.pub
+  if [ ! -s /etc/wireguard/wg-tun1.key ] || [ ! -s /etc/wireguard/wg-tun1.pub ]; then
+    wg genkey > /etc/wireguard/wg-tun1.key
+    wg pubkey < /etc/wireguard/wg-tun1.key > /etc/wireguard/wg-tun1.pub
   fi
-  echo "RESULT_WG1_PUB_KEY: $(cat /etc/wireguard/wg1.pub)"
+  echo "RESULT_WG_TUN1_PUB_KEY: $(cat /etc/wireguard/wg-tun1.pub)"
   
   if [ -f /var/run/reboot-required ]; then
     log_step "prepare" "System requires a reboot. Marking for reboot..."
@@ -87,10 +87,10 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
 do_configure() {
   PEER_PUB="$1"
   if [ -z "$PEER_PUB" ]; then
-    if [ -f /etc/wireguard/peer_wg0.pub ]; then
-      PEER_PUB=$(cat /etc/wireguard/peer_wg0.pub)
+    if [ -f /etc/wireguard/peer_wg-tun2.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg-tun2.pub)
     else
-      log_step "configure" "ERROR: No peer public key provided or found in peer_wg0.pub."
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg-tun2.pub."
       echo "Usage: $0 configure [PEER_PUBLIC_KEY]"
       exit 1
     fi
@@ -100,7 +100,7 @@ do_configure() {
   
   # 2. Setup WG-Easy (Client Gateway)
   log_step "configure" "Cleaning up previous installations..."
-  systemctl stop wg-quick@wg0 wg-quick@wg1 2>/dev/null || true
+  systemctl stop wg-quick@wg-gate wg-quick@wg-tun1 2>/dev/null || true
   if command -v docker &> /dev/null; then
     docker stop wg-easy 2>/dev/null || true
     docker rm wg-easy 2>/dev/null || true
@@ -119,6 +119,7 @@ services:
       - WG_ALLOWED_IPS=0.0.0.0/0
       - WG_PORT=$WG_EASY_PORT
       - PORT=$WG_EASY_UI_PORT
+      - WG_DEVICE=wg-gate
     image: ghcr.io/wg-easy/wg-easy
     container_name: wg-easy
     network_mode: "host"
@@ -136,17 +137,17 @@ EOF
   echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
   sysctl -p /etc/sysctl.d/99-wireguard.conf || true
 
-  # 4. Setup VPS-to-VPS Tunnel (wg1)
-  log_step "configure" "Configuring VPS-to-VPS Tunnel (wg1) with Peer Key: $PEER_PUB"
+  # 4. Setup VPS-to-VPS Tunnel (wg-tun1)
+  log_step "configure" "Configuring VPS-to-VPS Tunnel (wg-tun1) with Peer Key: $PEER_PUB"
   if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
     echo "200 vpn" >> /etc/iproute2/rt_tables
   fi
 
-  PRIV_KEY=$(cat /etc/wireguard/wg1.key)
+  PRIV_KEY=$(cat /etc/wireguard/wg-tun1.key)
   PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
   PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
 
-  cat <<EOF > /etc/wireguard/wg1.conf
+  cat <<EOF > /etc/wireguard/wg-tun1.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
@@ -154,7 +155,7 @@ ListenPort = $WG_INTER_VPS_PORT
 MTU = 1280
 Table = off
 
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg-tun1.rp_filter=2; sysctl -w net.ipv4.conf.wg-gate.rp_filter=2 || true
 PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
@@ -162,8 +163,8 @@ PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
 PostUp = ip rule add from $PRIMARY_IP table main pref 100 || true
 PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
 PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
-PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT || true
-PostUp = iptables -I FORWARD 1 -o wg0 -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i wg-gate -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o wg-gate -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
 PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
@@ -174,8 +175,8 @@ PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
 PreDown = ip rule del from $PRIMARY_IP table main pref 100 || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
 PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
-PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
-PreDown = iptables -D FORWARD -o wg0 -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg-gate -j ACCEPT || true
+PreDown = iptables -D FORWARD -o wg-gate -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
 PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
@@ -186,15 +187,15 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
-  log_step "configure" "Starting WireGuard wg1..."
-  systemctl enable wg-quick@wg1 || true
-  systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
+  log_step "configure" "Starting WireGuard wg-tun1..."
+  systemctl enable wg-quick@wg-tun1 || true
+  systemctl restart wg-quick@wg-tun1 || wg-quick up wg-tun1 || true
 
   # Verification
-  if ip a show wg1 >/dev/null 2>&1; then
-    log_step "configure" "SUCCESS: wg1 interface is UP."
+  if ip a show wg-tun1 >/dev/null 2>&1; then
+    log_step "configure" "SUCCESS: wg-tun1 interface is UP."
   else
-    log_step "configure" "ERROR: wg1 interface failed to start. Check 'journalctl -u wg-quick@wg1'"
+    log_step "configure" "ERROR: wg-tun1 interface failed to start. Check 'journalctl -u wg-quick@wg-tun1'"
   fi
 
   log_step "configure" "--- VPS1 Configuration Phase Complete ---"

@@ -1,7 +1,7 @@
 #!/bin/bash
 # VPS2 Setup Script (Exit Node)
 # This script configures VPS2 as the final exit point for all traffic.
-# Standardized to use wg0 for the tunnel to VPS1.
+# Standardized to use wg-tun2 for the tunnel to VPS1.
 
 set -ex
 
@@ -46,13 +46,13 @@ do_prepare() {
     exit 1
   fi
 
-  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg-tun2)..."
   mkdir -p /etc/wireguard
-  if [ ! -s /etc/wireguard/wg0.key ] || [ ! -s /etc/wireguard/wg0.pub ]; then
-    wg genkey > /etc/wireguard/wg0.key
-    wg pubkey < /etc/wireguard/wg0.key > /etc/wireguard/wg0.pub
+  if [ ! -s /etc/wireguard/wg-tun2.key ] || [ ! -s /etc/wireguard/wg-tun2.pub ]; then
+    wg genkey > /etc/wireguard/wg-tun2.key
+    wg pubkey < /etc/wireguard/wg-tun2.key > /etc/wireguard/wg-tun2.pub
   fi
-  echo "RESULT_WG0_PUB_KEY: $(cat /etc/wireguard/wg0.pub)"
+  echo "RESULT_WG_TUN2_PUB_KEY: $(cat /etc/wireguard/wg-tun2.pub)"
   
   if [ -f /var/run/reboot-required ]; then
     log_step "prepare" "System requires a reboot. Marking for reboot..."
@@ -65,10 +65,10 @@ do_prepare() {
 do_configure() {
   PEER_PUB="$1"
   if [ -z "$PEER_PUB" ]; then
-    if [ -f /etc/wireguard/peer_wg1.pub ]; then
-      PEER_PUB=$(cat /etc/wireguard/peer_wg1.pub)
+    if [ -f /etc/wireguard/peer_wg-tun1.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg-tun1.pub)
     else
-      log_step "configure" "ERROR: No peer public key provided or found in peer_wg1.pub."
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg-tun1.pub."
       echo "Usage: $0 configure [PEER_PUBLIC_KEY]"
       exit 1
     fi
@@ -81,14 +81,14 @@ do_configure() {
   echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
   sysctl -p /etc/sysctl.d/99-wireguard.conf || true
 
-  log_step "configure" "Configuring WireGuard (wg0) as Exit Node with Peer Key: $PEER_PUB"
+  log_step "configure" "Configuring WireGuard (wg-tun2) as Exit Node with Peer Key: $PEER_PUB"
   mkdir -p /etc/wireguard
-  systemctl stop wg-quick@wg0 2>/dev/null || true
+  systemctl stop wg-quick@wg-tun2 2>/dev/null || true
 
-  PRIV_KEY=$(cat /etc/wireguard/wg0.key)
+  PRIV_KEY=$(cat /etc/wireguard/wg-tun2.key)
   PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
 
-  cat <<EOF > /etc/wireguard/wg0.conf
+  cat <<EOF > /etc/wireguard/wg-tun2.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.2/24
@@ -110,9 +110,9 @@ PublicKey = $PEER_PUB
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
 
-  log_step "configure" "Starting WireGuard wg0..."
-  systemctl enable wg-quick@wg0 || true
-  systemctl restart wg-quick@wg0 || wg-quick up wg0 || true
+  log_step "configure" "Starting WireGuard wg-tun2..."
+  systemctl enable wg-quick@wg-tun2 || true
+  systemctl restart wg-quick@wg-tun2 || wg-quick up wg-tun2 || true
 
   log_step "configure" "--- VPS2 Configuration Phase Complete ---"
 }

@@ -1,7 +1,7 @@
 {
   "name": "double-tunnel",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0",
   "description": "Double Tunnel VPN Application",
   "author": "Double Tunnel Team",
   "type": "module",
@@ -15,7 +15,8 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "perMachine": true
+      "perMachine": true,
+      "installDirectory": "C:\\Program Files\\Double Tunnel"
     }
   },
   "scripts": {

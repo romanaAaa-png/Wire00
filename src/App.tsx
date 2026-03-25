@@ -79,10 +79,12 @@ interface VPSConfig {
   sshKeyId?: string;
   ports?: { [key: string]: number };
   portConflicts?: { port: number, service: string, purpose: string }[];
-  wg0PublicKey?: string;
-  wg0PrivateKey?: string;
-  wg1PublicKey?: string;
-  wg1PrivateKey?: string;
+  wgGatePublicKey?: string;
+  wgTun1PublicKey?: string;
+  wgTun2PublicKey?: string;
+  wgGatePrivateKey?: string;
+  wgTun1PrivateKey?: string;
+  wgTun2PrivateKey?: string;
   connectionStatus?: 'idle' | 'testing' | 'success' | 'error';
 }
 
@@ -237,9 +239,9 @@ const INITIAL_PRE_SETUP_CONFIG = {
   vps1Password: '',
   vps2Ip: '',
   vps2Password: '',
-  vps1Wg0Pub: '',
-  vps1Wg1Pub: '',
-  vps2Wg0Pub: '',
+  vps1WgGatePub: '',
+  vps1WgTun1Pub: '',
+  vps2WgTun2Pub: '',
   clientCount: 5,
   clientNames: 'Client1, Client2, Client3, Client4, Client5',
   setupIniPath: 'C:\\DoubleTunnel\\setup.ini'
@@ -266,26 +268,26 @@ const parseIniContent = (data: string, currentConfig: typeof INITIAL_PRE_SETUP_C
     if (currentSection === 'VPS1') {
       if (k === 'IP') newConfig.vps1Ip = value;
       if (k === 'PASSWORD') newConfig.vps1Password = value;
-      if (k === 'WG0_PUB') newConfig.vps1Wg0Pub = value;
-      if (k === 'WG1_PUB') newConfig.vps1Wg1Pub = value;
+      if (k === 'WG_GATE_PUB') newConfig.vps1WgGatePub = value;
+      if (k === 'WG_TUN1_PUB') newConfig.vps1WgTun1Pub = value;
     } else if (currentSection === 'VPS2') {
       if (k === 'IP') newConfig.vps2Ip = value;
       if (k === 'PASSWORD') newConfig.vps2Password = value;
-      if (k === 'WG0_PUB') newConfig.vps2Wg0Pub = value;
+      if (k === 'WG_TUN2_PUB') newConfig.vps2WgTun2Pub = value;
     } else if (currentSection === 'WIREGUARD') {
       if (k === 'CLIENTCOUNT') newConfig.clientCount = parseInt(value) || 5;
       if (k === 'CLIENTNAMES') newConfig.clientNames = value;
-      if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
-      if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
-      if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
+      if (k === 'VPS1_WG_GATE_PUB') newConfig.vps1WgGatePub = value;
+      if (k === 'VPS1_WG_TUN1_PUB') newConfig.vps1WgTun1Pub = value;
+      if (k === 'VPS2_WG_TUN2_PUB') newConfig.vps2WgTun2Pub = value;
     } else {
       if (k === 'VPS1_IP') newConfig.vps1Ip = value;
       if (k === 'VPS1_PASSWORD') newConfig.vps1Password = value;
       if (k === 'VPS2_IP') newConfig.vps2Ip = value;
       if (k === 'VPS2_PASSWORD') newConfig.vps2Password = value;
-      if (k === 'VPS1_WG0_PUB') newConfig.vps1Wg0Pub = value;
-      if (k === 'VPS1_WG1_PUB') newConfig.vps1Wg1Pub = value;
-      if (k === 'VPS2_WG0_PUB') newConfig.vps2Wg0Pub = value;
+      if (k === 'VPS1_WG_GATE_PUB') newConfig.vps1WgGatePub = value;
+      if (k === 'VPS1_WG_TUN1_PUB') newConfig.vps1WgTun1Pub = value;
+      if (k === 'VPS2_WG_TUN2_PUB') newConfig.vps2WgTun2Pub = value;
       if (k === 'CLIENT_COUNT') newConfig.clientCount = parseInt(value) || 5;
       if (k === 'CLIENT_NAMES') newConfig.clientNames = value;
     }
@@ -422,20 +424,20 @@ fi
 # 2. Generate new keys
 NEW_PRIV=\$(wg genkey)
 NEW_PUB=\$(echo "\$NEW_PRIV" | wg pubkey)
-OLD_PRIV=\$(cat /etc/wireguard/wg1.key)
-OLD_PUB=\$(cat /etc/wireguard/wg1.pub)
+OLD_PRIV=\$(cat /etc/wireguard/wg-tun1.key)
+OLD_PUB=\$(cat /etc/wireguard/wg-tun1.pub)
 
 log_msg "Generated new ephemeral keys. Pushing new public key to peer..."
 
 # 3. Add new public key to peer's allowed list (temporarily allowing both keys)
-if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg0 peer \$NEW_PUB allowed-ips 10.9.0.0/24,10.8.0.0/24"; then
+if ! ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg-tun2 peer \$NEW_PUB allowed-ips 10.9.0.0/24,10.8.0.0/24"; then
     log_msg "ERROR: Failed to add new key to peer. Aborting rotation."
     exit 1
 fi
 
 # 4. Apply new private key locally
 log_msg "Applying new private key locally..."
-wg set wg1 private-key <(echo "\$NEW_PRIV")
+wg set wg-tun1 private-key <(echo "\$NEW_PRIV")
 
 # 5. Verify connectivity with new keys
 log_msg "Testing tunnel connectivity with new keys..."
@@ -443,25 +445,230 @@ if ping -c 3 -W 5 "\$PEER_IP" > /dev/null; then
     log_msg "Connectivity verified! Committing changes..."
     
     # Save locally
-    echo "\$NEW_PRIV" > /etc/wireguard/wg1.key
-    echo "\$NEW_PUB" > /etc/wireguard/wg1.pub
-    sed -i "s|PrivateKey = .*|PrivateKey = \$NEW_PRIV|" /etc/wireguard/wg1.conf
+    echo "\$NEW_PRIV" > /etc/wireguard/wg-tun1.key
+    echo "\$NEW_PUB" > /etc/wireguard/wg-tun1.pub
+    sed -i "s|PrivateKey = .*|PrivateKey = \$NEW_PRIV|" /etc/wireguard/wg-tun1.conf
     
     # Remove old key from peer and save peer config
-    ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg0 peer \$OLD_PUB remove && wg-quick save wg0"
+    ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg-tun2 peer \$OLD_PUB remove && wg-quick save wg-tun2"
     
     log_msg "Key rotation completed successfully."
 else
     log_msg "ERROR: Connectivity failed with new keys. Initiating rollback..."
     
     # Rollback local
-    wg set wg1 private-key <(echo "\$OLD_PRIV")
+    wg set wg-tun1 private-key <(echo "\$OLD_PRIV")
     
     # Rollback peer
-    ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg0 peer \$NEW_PUB remove"
+    ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@"\$PEER_IP" "wg set wg-tun2 peer \$NEW_PUB remove"
     
     log_msg "Rollback complete. Old keys are still active."
     exit 1
+fi
+`
+    },
+    {
+      id: 'interactive-setup',
+      title: 'Interactive Manual Setup (Recommended)',
+      description: 'A guided script that handles key generation and exchange interactively.',
+      icon: Terminal,
+      content: `#!/bin/bash
+# Double Tunnel - Interactive Setup Script
+# This script guides you through the manual installation process.
+
+set -e
+
+# Colors for better readability
+RED='\\033[0;31m'
+GREEN='\\033[0;32m'
+BLUE='\\033[0;34m'
+NC='\\033[0m' # No Color
+
+echo -e "\${BLUE}======================================================\${NC}"
+echo -e "\${BLUE}   DOUBLE TUNNEL - INTERACTIVE MANUAL SETUP\${NC}"
+echo -e "\${BLUE}======================================================\${NC}"
+
+# 1. Root Check
+if [ "\$EUID" -ne 0 ]; then
+  echo -e "\${RED}[ERROR] Please run as root (sudo su -)\${NC}"
+  exit 1
+fi
+
+echo -e "\\n\${BLUE}Step 1: Identify this VPS role\${NC}"
+echo "1) VPS1 (Gateway / Entry Node) - This is where your clients connect."
+echo "2) VPS2 (Exit Node) - This is where your traffic exits to the internet."
+read -p "Select role [1-2]: " ROLE_CHOICE
+
+if [ "\$ROLE_CHOICE" == "1" ]; then
+    ROLE="VPS1"
+    IFACE="wg-tun1"
+    PEER_IFACE="wg-tun2"
+elif [ "\$ROLE_CHOICE" == "2" ]; then
+    ROLE="VPS2"
+    IFACE="wg-tun2"
+    PEER_IFACE="wg-tun1"
+else
+    echo -e "\${RED}Invalid choice. Exiting.\${NC}"
+    exit 1
+fi
+
+echo -e "\\n\${BLUE}Step 2: Preparing System (Installing dependencies)\${NC}"
+apt-get update
+apt-get install -y wireguard wireguard-tools iptables curl iproute2 sshpass docker.io docker-compose-v2
+
+# Enable IP Forwarding
+echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-double-tunnel.conf
+sysctl -p /etc/sysctl.d/99-double-tunnel.conf || true
+
+echo -e "\\n\${BLUE}Step 3: Generating WireGuard Keys for \$ROLE\${NC}"
+mkdir -p /etc/wireguard
+if [ ! -s /etc/wireguard/\${IFACE}.key ]; then
+    wg genkey > /etc/wireguard/\${IFACE}.key
+    wg pubkey < /etc/wireguard/\${IFACE}.key > /etc/wireguard/\${IFACE}.pub
+    echo -e "\${GREEN}[OK] Keys generated.\${NC}"
+else
+    echo -e "\${GREEN}[OK] Keys already exist.\${NC}"
+fi
+
+MY_PUB_KEY=\$(cat /etc/wireguard/\${IFACE}.pub)
+
+echo -e "\\n\${BLUE}======================================================\${NC}"
+echo -e "\${GREEN}ACTION REQUIRED:\${NC}"
+echo -e "Your Public Key for \$ROLE is:"
+echo -e "\${BLUE}\$MY_PUB_KEY\${NC}"
+echo -e "------------------------------------------------------"
+echo -e "1. Copy the key above."
+echo -e "2. Go to the OTHER VPS and run this script."
+echo -e "3. When prompted, paste the key you just copied."
+echo -e "======================================================\${NC}"
+
+read -p "Do you have the OTHER VPS's Public Key ready? (y/n): " READY
+if [[ "\$READY" != "y" && "\$READY" != "Y" ]]; then
+    echo -e "\\n\${BLUE}Please run this script on the other VPS first.\${NC}"
+    echo -e "Once you have the other key, run this script again and choose 'y'."
+    exit 0
+fi
+
+read -p "Paste the OTHER VPS's Public Key here: " PEER_PUB_KEY
+
+if [ -z "\$PEER_PUB_KEY" ]; then
+    echo -e "\${RED}Error: Peer Public Key cannot be empty.\${NC}"
+    exit 1
+fi
+
+# Save the peer key
+echo "\$PEER_PUB_KEY" > /etc/wireguard/peer_\${IFACE}.pub
+
+echo -e "\\n\${BLUE}Step 4: Finalizing Configuration for \$ROLE\${NC}"
+
+if [ "\$ROLE" == "VPS1" ]; then
+    # VPS1 Configuration
+    read -p "Enter VPS2 Public IP Address: " VPS2_IP
+    if [ -z "\$VPS2_IP" ]; then echo -e "\${RED}Error: IP required.\${NC}"; exit 1; fi
+    
+    PRIMARY_IF=\$(ip route | grep default | awk '{print \$5}' | head -n1 || echo "eth0")
+    PRIMARY_IP=\$(ip -4 addr show "\$PRIMARY_IF" | awk '/inet / {print \$2}' | cut -d/ -f1 | head -n1)
+    PRIV_KEY=\$(cat /etc/wireguard/wg-tun1.key)
+
+    cat <<EOF > /etc/wireguard/wg-tun1.conf
+[Interface]
+PrivateKey = \$PRIV_KEY
+Address = 10.9.0.1/24
+ListenPort = 51820
+MTU = 1280
+Table = off
+
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.\$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg-tun1.rp_filter=2; sysctl -w net.ipv4.conf.wg-gate.rp_filter=2 || true
+PostUp = ip route add 10.9.0.0/24 dev %i || true
+PostUp = ip route add default dev %i table 200 || true
+PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
+PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
+PostUp = ip rule add from \$PRIMARY_IP table main pref 100 || true
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i wg-gate -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o wg-gate -j ACCEPT || true
+PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+
+PreDown = ip route del 10.9.0.0/24 dev %i || true
+PreDown = ip route del default dev %i table 200 || true
+PreDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true
+PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
+PreDown = ip rule del from \$PRIMARY_IP table main pref 100 || true
+PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg-gate -j ACCEPT || true
+PreDown = iptables -D FORWARD -o wg-gate -j ACCEPT || true
+PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
+PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+
+[Peer]
+PublicKey = \$PEER_PUB_KEY
+Endpoint = \$VPS2_IP:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+EOF
+    systemctl enable wg-quick@wg-tun1 || true
+    systemctl restart wg-quick@wg-tun1 || wg-quick up wg-tun1 || true
+    echo -e "\${GREEN}[OK] VPS1 Tunnel (wg-tun1) is UP.\${NC}"
+
+    # Start wg-easy
+    echo -e "\\n\${BLUE}Step 5: Starting wg-easy (Client Gateway)\${NC}"
+    MY_IP=\$(curl -s https://ifconfig.me)
+    docker run -d \\
+      --name=wg-easy \\
+      --network host \\
+      -e WG_HOST=\$MY_IP \\
+      -e WG_MTU=1280 \\
+      -e PASSWORD=admin123 \\
+      -e WG_DEVICE=wg-gate \\
+      -v /etc/wireguard:/etc/wireguard \\
+      --cap-add=NET_ADMIN \\
+      --cap-add=SYS_MODULE \\
+      --restart unless-stopped \\
+      ghcr.io/wg-easy/wg-easy || true
+    echo -e "\${GREEN}[OK] wg-easy is running. Access UI at http://\$MY_IP:51821\${NC}"
+
+else
+    # VPS2 Configuration
+    PRIMARY_IF=\$(ip route | grep default | awk '{print \$5}' | head -n1 || echo "eth0")
+    PRIV_KEY=\$(cat /etc/wireguard/wg-tun2.key)
+
+    cat <<EOF > /etc/wireguard/wg-tun2.conf
+[Interface]
+PrivateKey = \$PRIV_KEY
+Address = 10.9.0.2/24
+ListenPort = 51820
+MTU = 1280
+
+PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
+PostUp = iptables -t nat -A POSTROUTING -o \$PRIMARY_IF -j MASQUERADE || true
+PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+
+PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
+PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
+PreDown = iptables -t nat -D POSTROUTING -o \$PRIMARY_IF -j MASQUERADE || true
+PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+
+[Peer]
+PublicKey = \$PEER_PUB_KEY
+AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
+EOF
+    systemctl enable wg-quick@wg-tun2 || true
+    systemctl restart wg-quick@wg-tun2 || wg-quick up wg-tun2 || true
+    echo -e "\${GREEN}[OK] VPS2 Tunnel (wg-tun2) is UP.\${NC}"
+fi
+
+echo -e "\\n\${GREEN}======================================================\${NC}"
+echo -e "\${GREEN}   SETUP COMPLETE FOR \$ROLE\${NC}"
+echo -e "\${GREEN}======================================================\${NC}"
+echo "Verify connectivity by pinging the other VPS:"
+if [ "\$ROLE" == "VPS1" ]; then
+    echo "ping 10.9.0.2"
+else
+    echo "ping 10.9.0.1"
 fi
 `
     },
@@ -526,13 +733,13 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
   systemctl enable docker || true
   systemctl start docker || true
 
-  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg1)..."
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg-tun1)..."
   mkdir -p /etc/wireguard
-  if [ ! -s /etc/wireguard/wg1.key ] || [ ! -s /etc/wireguard/wg1.pub ]; then
-    wg genkey > /etc/wireguard/wg1.key
-    wg pubkey < /etc/wireguard/wg1.key > /etc/wireguard/wg1.pub
+  if [ ! -s /etc/wireguard/wg-tun1.key ] || [ ! -s /etc/wireguard/wg-tun1.pub ]; then
+    wg genkey > /etc/wireguard/wg-tun1.key
+    wg pubkey < /etc/wireguard/wg-tun1.key > /etc/wireguard/wg-tun1.pub
   fi
-  echo "RESULT_WG1_PUB_KEY: $(cat /etc/wireguard/wg1.pub)"
+  echo "RESULT_WG_TUN1_PUB_KEY: $(cat /etc/wireguard/wg-tun1.pub)"
   
   if [ -f /var/run/reboot-required ]; then
     log_step "prepare" "System requires a reboot. Marking for reboot..."
@@ -545,10 +752,10 @@ Signed-By: /etc/apt/keyrings/docker.asc" | tee /etc/apt/sources.list.d/docker.so
 do_configure() {
   PEER_PUB="$1"
   if [ -z "$PEER_PUB" ]; then
-    if [ -f /etc/wireguard/peer_wg0.pub ]; then
-      PEER_PUB=$(cat /etc/wireguard/peer_wg0.pub)
+    if [ -f /etc/wireguard/peer_wg-tun2.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg-tun2.pub)
     else
-      log_step "configure" "ERROR: No peer public key provided or found in peer_wg0.pub."
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg-tun2.pub."
       exit 1
     fi
   fi
@@ -557,7 +764,7 @@ do_configure() {
   
   # 2. Setup WG-Easy (Client Gateway)
   log_step "configure" "Cleaning up previous installations..."
-  systemctl stop wg-quick@wg0 wg-quick@wg1 2>/dev/null || true
+  systemctl stop wg-quick@wg-gate wg-quick@wg-tun1 2>/dev/null || true
   if command -v docker &> /dev/null; then
     docker stop wg-easy 2>/dev/null || true
     docker rm wg-easy 2>/dev/null || true
@@ -576,6 +783,7 @@ services:
       - WG_ALLOWED_IPS=0.0.0.0/0
       - WG_PORT=__WG_EASY_PORT__
       - PORT=__WG_EASY_UI_PORT__
+      - WG_DEVICE=wg-gate
     image: ghcr.io/wg-easy/wg-easy
     container_name: wg-easy
     network_mode: "host"
@@ -593,17 +801,17 @@ EOF
   echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
   sysctl -p /etc/sysctl.d/99-wireguard.conf || true
 
-  # 4. Setup VPS-to-VPS Tunnel (wg1)
-  log_step "configure" "Configuring VPS-to-VPS Tunnel (wg1) with Peer Key: $PEER_PUB"
+  # 4. Setup VPS-to-VPS Tunnel (wg-tun1)
+  log_step "configure" "Configuring VPS-to-VPS Tunnel (wg-tun1) with Peer Key: $PEER_PUB"
   if ! grep -q "200 vpn" /etc/iproute2/rt_tables; then
     echo "200 vpn" >> /etc/iproute2/rt_tables
   fi
 
-  PRIV_KEY=$(cat /etc/wireguard/wg1.key)
+  PRIV_KEY=$(cat /etc/wireguard/wg-tun1.key)
   PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
   PRIMARY_IP=$(ip -4 addr show "$PRIMARY_IF" | awk '/inet / {print $2}' | cut -d/ -f1 | head -n1)
 
-  cat <<EOF > /etc/wireguard/wg1.conf
+  cat <<EOF > /etc/wireguard/wg-tun1.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.1/24
@@ -611,7 +819,7 @@ ListenPort = __WG_INTER_VPS_PORT__
 MTU = 1280
 Table = off
 
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.\$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.\$PRIMARY_IF.rp_filter=2; sysctl -w net.ipv4.conf.wg-tun1.rp_filter=2; sysctl -w net.ipv4.conf.wg-gate.rp_filter=2 || true
 PostUp = ip route add 10.9.0.0/24 dev %i || true
 PostUp = ip route add default dev %i table 200 || true
 PostUp = ip rule add from 10.8.0.0/24 table 200 priority 10 || true
@@ -619,8 +827,8 @@ PostUp = ip rule add from 10.9.0.1 table 200 priority 10 || true
 PostUp = ip rule add from \$PRIMARY_IP table main pref 100 || true
 PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT || true
 PostUp = iptables -I FORWARD 1 -o %i -j ACCEPT || true
-PostUp = iptables -I FORWARD 1 -i wg0 -j ACCEPT || true
-PostUp = iptables -I FORWARD 1 -o wg0 -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -i wg-gate -j ACCEPT || true
+PostUp = iptables -I FORWARD 1 -o wg-gate -j ACCEPT || true
 PostUp = iptables -t nat -A POSTROUTING -o %i -j MASQUERADE || true
 PostUp = iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
@@ -631,8 +839,8 @@ PreDown = ip rule del from 10.9.0.1 table 200 priority 10 || true
 PreDown = ip rule del from \$PRIMARY_IP table main pref 100 || true
 PreDown = iptables -D FORWARD -i %i -j ACCEPT || true
 PreDown = iptables -D FORWARD -o %i -j ACCEPT || true
-PreDown = iptables -D FORWARD -i wg0 -j ACCEPT || true
-PreDown = iptables -D FORWARD -o wg0 -j ACCEPT || true
+PreDown = iptables -D FORWARD -i wg-gate -j ACCEPT || true
+PreDown = iptables -D FORWARD -o wg-gate -j ACCEPT || true
 PreDown = iptables -t nat -D POSTROUTING -o %i -j MASQUERADE || true
 PreDown = iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
@@ -643,20 +851,20 @@ AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25
 EOF
 
-  log_step "configure" "Starting WireGuard wg1..."
-  systemctl enable wg-quick@wg1 || true
-  systemctl restart wg-quick@wg1 || wg-quick up wg1 || true
+  log_step "configure" "Starting WireGuard wg-tun1..."
+  systemctl enable wg-quick@wg-tun1 || true
+  systemctl restart wg-quick@wg-tun1 || wg-quick up wg-tun1 || true
 
   # Wait for wg-easy to generate its key
-  WG0_PUB=""
+  WG_GATE_PUB=""
   for i in {1..10}; do
-    if docker exec wg-easy wg show wg0 public-key &>/dev/null; then
-      WG0_PUB=$(docker exec wg-easy wg show wg0 public-key)
-      if [ -n "$WG0_PUB" ]; then break; fi
+    if docker exec wg-easy wg show wg-gate public-key &>/dev/null; then
+      WG_GATE_PUB=$(docker exec wg-easy wg show wg-gate public-key)
+      if [ -n "$WG_GATE_PUB" ]; then break; fi
     fi
     sleep 2
   done
-  echo "RESULT_WG0_PUB_KEY: $WG0_PUB"
+  echo "RESULT_WG_GATE_PUB_KEY: $WG_GATE_PUB"
 
   log_step "configure" "--- VPS1 Configuration Phase Complete ---"
 }
@@ -696,10 +904,10 @@ esac
 `,
       rollbackContent: `#!/bin/bash
 # VPS1 Rollback Script
-systemctl stop wg-quick@wg1 || true
-systemctl disable wg-quick@wg1 || true
+systemctl stop wg-quick@wg-tun1 || true
+systemctl disable wg-quick@wg-tun1 || true
 cd /etc/wireguard && docker compose down || true
-rm -rf /etc/wireguard/wg1.*
+rm -rf /etc/wireguard/wg-tun1.*
 `
     },
     {
@@ -746,13 +954,13 @@ do_prepare() {
     exit 1
   fi
 
-  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg0)..."
+  log_step "prepare" "Generating WireGuard keys for inter-VPS tunnel (wg-tun2)..."
   mkdir -p /etc/wireguard
-  if [ ! -s /etc/wireguard/wg0.key ] || [ ! -s /etc/wireguard/wg0.pub ]; then
-    wg genkey > /etc/wireguard/wg0.key
-    wg pubkey < /etc/wireguard/wg0.key > /etc/wireguard/wg0.pub
+  if [ ! -s /etc/wireguard/wg-tun2.key ] || [ ! -s /etc/wireguard/wg-tun2.pub ]; then
+    wg genkey > /etc/wireguard/wg-tun2.key
+    wg pubkey < /etc/wireguard/wg-tun2.key > /etc/wireguard/wg-tun2.pub
   fi
-  echo "RESULT_WG0_PUB_KEY: $(cat /etc/wireguard/wg0.pub)"
+  echo "RESULT_WG_TUN2_PUB_KEY: $(cat /etc/wireguard/wg-tun2.pub)"
   
   if [ -f /var/run/reboot-required ]; then
     log_step "prepare" "System requires a reboot. Marking for reboot..."
@@ -765,10 +973,10 @@ do_prepare() {
 do_configure() {
   PEER_PUB="$1"
   if [ -z "$PEER_PUB" ]; then
-    if [ -f /etc/wireguard/peer_wg1.pub ]; then
-      PEER_PUB=$(cat /etc/wireguard/peer_wg1.pub)
+    if [ -f /etc/wireguard/peer_wg-tun1.pub ]; then
+      PEER_PUB=$(cat /etc/wireguard/peer_wg-tun1.pub)
     else
-      log_step "configure" "ERROR: No peer public key provided or found in peer_wg1.pub."
+      log_step "configure" "ERROR: No peer public key provided or found in peer_wg-tun1.pub."
       exit 1
     fi
   fi
@@ -780,14 +988,14 @@ do_configure() {
   echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
   sysctl -p /etc/sysctl.d/99-wireguard.conf || true
 
-  log_step "configure" "Configuring WireGuard (wg0) as Exit Node with Peer Key: $PEER_PUB"
+  log_step "configure" "Configuring WireGuard (wg-tun2) as Exit Node with Peer Key: $PEER_PUB"
   mkdir -p /etc/wireguard
-  systemctl stop wg-quick@wg0 2>/dev/null || true
+  systemctl stop wg-quick@wg-tun2 2>/dev/null || true
 
-  PRIV_KEY=$(cat /etc/wireguard/wg0.key)
+  PRIV_KEY=$(cat /etc/wireguard/wg-tun2.key)
   PRIMARY_IF=$(ip route | grep default | awk '{print $5}' | head -n1 || echo "eth0")
 
-  cat <<EOF > /etc/wireguard/wg0.conf
+  cat <<EOF > /etc/wireguard/wg-tun2.conf
 [Interface]
 PrivateKey = $PRIV_KEY
 Address = 10.9.0.2/24
@@ -809,9 +1017,9 @@ PublicKey = $PEER_PUB
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
 EOF
 
-  log_step "configure" "Starting WireGuard wg0..."
-  systemctl enable wg-quick@wg0 || true
-  systemctl restart wg-quick@wg0 || wg-quick up wg0 || true
+  log_step "configure" "Starting WireGuard wg-tun2..."
+  systemctl enable wg-quick@wg-tun2 || true
+  systemctl restart wg-quick@wg-tun2 || wg-quick up wg-tun2 || true
 
   log_step "configure" "--- VPS2 Configuration Phase Complete ---"
 }
@@ -851,9 +1059,9 @@ esac
 `,
       rollbackContent: `#!/bin/bash
 # VPS2 Rollback Script
-systemctl stop wg-quick@wg0 || true
-systemctl disable wg-quick@wg0 || true
-rm -f /etc/wireguard/wg0.*
+systemctl stop wg-quick@wg-tun2 || true
+systemctl disable wg-quick@wg-tun2 || true
+rm -f /etc/wireguard/wg-tun2.*
 `
     },
     {
@@ -1041,8 +1249,9 @@ echo "--- WARNING: Initiating Full System Wipe ---"
 set -x
 
 # 1. Stop all services
-systemctl stop wg-quick@wg0 || true
-systemctl stop wg-quick@wg1 || true
+systemctl stop wg-quick@wg-gate || true
+systemctl stop wg-quick@wg-tun1 || true
+systemctl stop wg-quick@wg-tun2 || true
 docker stop wg-easy || true
 docker rm wg-easy || true
 
@@ -1133,7 +1342,7 @@ fi
 `
     },
     {
-      id: 'vps-check',
+      id: 'vps-diagnostic',
       title: 'VPS Diagnostic Tool (vps-check.sh)',
       description: 'Comprehensive diagnostic script to check WireGuard, Docker, and network status on any VPS.',
       icon: Activity,
@@ -1374,14 +1583,14 @@ pause
             ...activeTunnel.vps1, 
             ip: newConfig.vps1Ip, 
             password: newConfig.vps1Password,
-            wg0PublicKey: newConfig.vps1Wg0Pub || activeTunnel.vps1.wg0PublicKey,
-            wg1PublicKey: newConfig.vps1Wg1Pub || activeTunnel.vps1.wg1PublicKey
+            wgGatePublicKey: newConfig.vps1WgGatePub || activeTunnel.vps1.wgGatePublicKey,
+            wgTun1PublicKey: newConfig.vps1WgTun1Pub || activeTunnel.vps1.wgTun1PublicKey
           },
           vps2: { 
             ...activeTunnel.vps2, 
             ip: newConfig.vps2Ip, 
             password: newConfig.vps2Password,
-            wg0PublicKey: newConfig.vps2Wg0Pub || activeTunnel.vps2.wg0PublicKey
+            wgTun2PublicKey: newConfig.vps2WgTun2Pub || activeTunnel.vps2.wgTun2PublicKey
           }
         });
         addLog("Configuration loaded successfully from setup.ini and applied to current project.", "success");
@@ -1506,13 +1715,13 @@ pause
     const content = `[VPS1]
 IP=${preSetupConfig.vps1Ip || activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
 Password=${preSetupConfig.vps1Password || activeTunnel.vps1.password || '********'}
-WG0_PUB=${activeTunnel.vps1.wg0PublicKey || ''}
-WG1_PUB=${activeTunnel.vps1.wg1PublicKey || ''}
+WG_GATE_PUB=${activeTunnel.vps1.wgGatePublicKey || ''}
+WG_TUN1_PUB=${activeTunnel.vps1.wgTun1PublicKey || ''}
 
 [VPS2]
 IP=${preSetupConfig.vps2Ip || activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
 Password=${preSetupConfig.vps2Password || activeTunnel.vps2.password || '********'}
-WG0_PUB=${activeTunnel.vps2.wg0PublicKey || ''}
+WG_TUN2_PUB=${activeTunnel.vps2.wgTun2PublicKey || ''}
 
 [WireGuard]
 ClientCount=${preSetupConfig.clientCount}
@@ -1539,13 +1748,13 @@ ClientNames=${preSetupConfig.clientNames}
     const content = `[VPS1]
 IP=${preSetupConfig.vps1Ip || activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}
 Password=${preSetupConfig.vps1Password || activeTunnel.vps1.password || '********'}
-WG0_PUB=${activeTunnel.vps1.wg0PublicKey || ''}
-WG1_PUB=${activeTunnel.vps1.wg1PublicKey || ''}
+WG_GATE_PUB=${activeTunnel.vps1.wgGatePublicKey || ''}
+WG_TUN1_PUB=${activeTunnel.vps1.wgTun1PublicKey || ''}
 
 [VPS2]
 IP=${preSetupConfig.vps2Ip || activeTunnel.vps2.ip || 'XXX.XXX.XXX.XXX'}
 Password=${preSetupConfig.vps2Password || activeTunnel.vps2.password || '********'}
-WG0_PUB=${activeTunnel.vps2.wg0PublicKey || ''}
+WG_TUN2_PUB=${activeTunnel.vps2.wgTun2PublicKey || ''}
 
 [WireGuard]
 ClientCount=${preSetupConfig.clientCount}
@@ -1671,19 +1880,19 @@ ClientNames=${preSetupConfig.clientNames}
       const errorMsg2 = res.stderr || res.errorOutput || "Interface not up";
       console.warn(`Method 2 (wg show) failed for ${iface} on ${vps.ip}: ${errorMsg2}. Output: ${res.stdout}`);
 
-      // 3. Fallback: Try docker if it's wg0 (wg-easy)
-      if (iface === 'wg0') {
-        res = await sshExecute(vps, `docker exec wg-easy wg show wg0 public-key`);
+      // 3. Fallback: Try docker if it's wg-gate (wg-easy)
+      if (iface === 'wg-gate') {
+        res = await sshExecute(vps, `docker exec wg-easy wg show wg-gate public-key`);
         key = extractKey(res.stdout);
         if (res.code === 0 && key) return key;
       }
       
       // 4. Fallback: Try reading the peer file pushed by the other VPS
-      // If we are asking for wg1 on vps1, maybe it's not there, but wait, it should be.
+      // If we are asking for wg-tun1 on vps1, maybe it's not there, but wait, it should be.
       // Let's just return the raw stdout if it looks somewhat like a key, or throw a detailed error.
       
-      // If we are getting wg1 from vps1, it might have been pushed to vps2 as peer_wg1.pub
-      // If we are getting wg0 from vps2, it might have been pushed to vps1 as peer_wg0.pub
+      // If we are getting wg-tun1 from vps1, it might have been pushed to vps2 as peer_wg-tun1.pub
+      // If we are getting wg-tun2 from vps2, it might have been pushed to vps1 as peer_wg-tun2.pub
       const otherVps = vps.ip === activeTunnel.vps1.ip ? activeTunnel.vps2 : activeTunnel.vps1;
       const res3 = await sshExecute(otherVps, `cat /etc/wireguard/peer_${iface}.pub`);
       key = extractKey(res3.stdout);
@@ -1714,10 +1923,9 @@ ClientNames=${preSetupConfig.clientNames}
       return;
     }
 
-    // setIsDeploying(true);
     cancelDeploymentRef.current = false;
     updateActiveTunnel({ status: 'deploying', logs: [], step: 0 });
-    addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment...`, "info", "exchange");
+    addLog(`Starting Double VPN ${isCleanInstall ? 'Clean ' : ''}Deployment (v2.0.0)...`, "info", "exchange");
 
     const currentTunnel = { ...activeTunnel };
 
@@ -1728,189 +1936,73 @@ ClientNames=${preSetupConfig.clientNames}
         }
       };
 
-      // Step 1: VPS2 install docker
+      // 1. Get scripts and replace placeholders
+      const vps1ScriptTemplate = INITIAL_SCRIPTS.find(s => s.id === 'vps1-setup')?.content;
+      const vps2ScriptTemplate = INITIAL_SCRIPTS.find(s => s.id === 'vps2-setup')?.content;
+
+      if (!vps1ScriptTemplate || !vps2ScriptTemplate) {
+        throw new Error("Could not find deployment scripts in INITIAL_SCRIPTS.");
+      }
+
+      const vps1Script = vps1ScriptTemplate
+        .replace(/__VPS2_IP__/g, currentTunnel.vps2.ip)
+        .replace(/__WG_EASY_PORT__/g, '51821')
+        .replace(/__WG_EASY_UI_PORT__/g, '51822')
+        .replace(/__WG_INTER_VPS_PORT__/g, '51820')
+        .replace(/__WG_EXIT_PORT__/g, '51820');
+
+      const vps2Script = vps2ScriptTemplate
+        .replace(/__VPS1_IP__/g, currentTunnel.vps1.ip)
+        .replace(/__WG_INTER_VPS_PORT__/g, '51820')
+        .replace(/__WG_EXIT_PORT__/g, '51820');
+
+      // 2. Upload scripts
       checkCancel();
-      addLog("Step 1: VPS2 installing Docker...", "info", "vps2");
-      await sshExecute(currentTunnel.vps2, `
-        apt-get update && apt-get install -y docker.io sshpass curl
-        systemctl enable --now docker
-        docker --version
-      `);
-      addLog("Step 1 Complete: Docker installed on VPS2.", "success", "vps2");
+      addLog("Uploading deployment scripts to servers...", "info", "exchange");
+      await sshExecute(currentTunnel.vps1, `cat << 'EOF' > /root/vps1-setup.sh\n${vps1Script}\nEOF\nchmod +x /root/vps1-setup.sh`);
+      await sshExecute(currentTunnel.vps2, `cat << 'EOF' > /root/vps2-setup.sh\n${vps2Script}\nEOF\nchmod +x /root/vps2-setup.sh`);
 
-      // Step 2: VPS2 install wireguard and wg-easy
+      // 3. Run prepare on VPS1
       checkCancel();
-      addLog("Step 2: VPS2 installing WireGuard & wg-easy...", "info", "vps2");
-      await sshExecute(currentTunnel.vps2, `
-        apt-get install -y wireguard wireguard-tools
-        wg --version
-        docker pull weejewel/wg-easy
-      `);
-      addLog("Step 2 Complete: WireGuard installed on VPS2.", "success", "vps2");
+      addLog("Step 1: Running prepare phase on VPS1...", "info", "vps1");
+      const vps1PrepareRes = await sshExecute(currentTunnel.vps1, `/root/vps1-setup.sh prepare`);
+      const vps1PubKeyMatch = vps1PrepareRes.stdout.match(/RESULT_WG_TUN1_PUB_KEY:\s*([A-Za-z0-9+/=]+)/);
+      if (!vps1PubKeyMatch) {
+        throw new Error("Failed to extract wg-tun1 public key from VPS1 prepare output.");
+      }
+      const vps1PubKey = vps1PubKeyMatch[1];
+      addLog(`VPS1 wg-tun1 public key generated: ${vps1PubKey}`, "success", "vps1");
 
-      // Step 3: VPS1 install docker
+      // 4. Run prepare on VPS2
       checkCancel();
-      addLog("Step 3: VPS1 installing Docker...", "info", "vps1");
-      await sshExecute(currentTunnel.vps1, `
-        apt-get update && apt-get install -y docker.io sshpass curl
-        systemctl enable --now docker
-        docker --version
-      `);
-      addLog("Step 3 Complete: Docker installed on VPS1.", "success", "vps1");
+      addLog("Step 2: Running prepare phase on VPS2...", "info", "vps2");
+      const vps2PrepareRes = await sshExecute(currentTunnel.vps2, `/root/vps2-setup.sh prepare`);
+      const vps2PubKeyMatch = vps2PrepareRes.stdout.match(/RESULT_WG_TUN2_PUB_KEY:\s*([A-Za-z0-9+/=]+)/);
+      if (!vps2PubKeyMatch) {
+        throw new Error("Failed to extract wg-tun2 public key from VPS2 prepare output.");
+      }
+      const vps2PubKey = vps2PubKeyMatch[1];
+      addLog(`VPS2 wg-tun2 public key generated: ${vps2PubKey}`, "success", "vps2");
 
-      // Step 4: VPS1 install wireguard and wg-easy
+      // 5. Run configure on VPS2 (Exit Node)
       checkCancel();
-      addLog("Step 4: VPS1 installing WireGuard & wg-easy...", "info", "vps1");
-      await sshExecute(currentTunnel.vps1, `
-        apt-get install -y wireguard wireguard-tools
-        wg --version
-        docker pull weejewel/wg-easy
-      `);
-      addLog("Step 4 Complete: WireGuard installed on VPS1.", "success", "vps1");
+      addLog("Step 3: Configuring VPS2 (Exit Node)...", "info", "vps2");
+      await sshExecute(currentTunnel.vps2, `/root/vps2-setup.sh configure "${vps1PubKey}"`);
+      addLog("VPS2 configuration complete.", "success", "vps2");
 
-      // Step 5 & 6: VPS1 connects to VPS2 to generate keys
+      // 6. Run configure on VPS1 (Gateway)
       checkCancel();
-      addLog("Step 5 & 6: VPS1 connecting to VPS2 via SSH to generate keys...", "info", "exchange");
-      await sshExecute(currentTunnel.vps1, `
-        sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${currentTunnel.vps2.ip} "
-          mkdir -p /etc/wireguard
-          wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/wgpub2.key
-          chmod 600 /etc/wireguard/private.key
-          echo 'VPS2 Keys generated successfully.'
-        "
-      `);
-      addLog("Step 5 & 6 Complete: VPS2 keys generated via VPS1.", "success", "exchange");
+      addLog("Step 4: Configuring VPS1 (Gateway)...", "info", "vps1");
+      const vps1ConfigRes = await sshExecute(currentTunnel.vps1, `/root/vps1-setup.sh configure "${vps2PubKey}"`);
+      const wgGatePubKeyMatch = vps1ConfigRes.stdout.match(/RESULT_WG_GATE_PUB_KEY:\s*([A-Za-z0-9+/=]+)/);
+      if (wgGatePubKeyMatch) {
+        addLog(`VPS1 wg-gate public key: ${wgGatePubKeyMatch[1]}`, "success", "vps1");
+      }
+      addLog("VPS1 configuration complete.", "success", "vps1");
 
-      // Step 7: VPS1 SCPs public key from VPS2
+      // 7. Verify tunnel
       checkCancel();
-      addLog("Step 7: VPS1 copying wgpub2.key from VPS2...", "info", "exchange");
-      await sshExecute(currentTunnel.vps1, `
-        mkdir -p /etc/wireguard
-        sshpass -p '${currentTunnel.vps2.password}' scp -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip}:/etc/wireguard/wgpub2.key /etc/wireguard/wgpub2.key
-      `);
-      addLog("Step 7 Complete: VPS1 received VPS2 public key.", "success", "exchange");
-
-      // Step 8 & 9: VPS2 connects to VPS1 to generate keys
-      checkCancel();
-      addLog("Step 8 & 9: VPS2 connecting to VPS1 via SSH to generate keys...", "info", "exchange");
-      await sshExecute(currentTunnel.vps2, `
-        sshpass -p '${currentTunnel.vps1.password}' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@${currentTunnel.vps1.ip} "
-          mkdir -p /etc/wireguard
-          wg genkey | tee /etc/wireguard/private.key | wg pubkey > /etc/wireguard/wgpub1.key
-          chmod 600 /etc/wireguard/private.key
-          echo 'VPS1 Keys generated successfully.'
-        "
-      `);
-      addLog("Step 8 & 9 Complete: VPS1 keys generated via VPS2.", "success", "exchange");
-
-      // Step 10: VPS2 SCPs public key from VPS1
-      checkCancel();
-      addLog("Step 10: VPS2 copying wgpub1.key from VPS1...", "info", "exchange");
-      await sshExecute(currentTunnel.vps2, `
-        mkdir -p /etc/wireguard
-        sshpass -p '${currentTunnel.vps1.password}' scp -o StrictHostKeyChecking=no root@${currentTunnel.vps1.ip}:/etc/wireguard/wgpub1.key /etc/wireguard/wgpub1.key
-      `);
-      addLog("Step 10 Complete: VPS2 received VPS1 public key.", "success", "exchange");
-
-      // Step 11: VPS1 connects to VPS2 to configure wg0.conf
-      checkCancel();
-      addLog("Step 11: VPS1 configuring wg0.conf on VPS2...", "info", "exchange");
-      await sshExecute(currentTunnel.vps1, `
-        sshpass -p '${currentTunnel.vps2.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps2.ip} "
-          PRIV_KEY=\\$(cat /etc/wireguard/private.key)
-          PEER_PUB=\\\$(cat /etc/wireguard/wgpub1.key)
-          DEFAULT_IFACE=\\$(ip route ls default | awk '/default/ {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | head -n 1)
-          if [ -z "\\$DEFAULT_IFACE" ]; then DEFAULT_IFACE="eth0"; fi
-          cat > /etc/wireguard/wg0.conf << EOF
-[Interface]
-PrivateKey = \\$PRIV_KEY
-Address = 10.9.0.2/24
-ListenPort = 51820
-MTU = 1280
-PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT; iptables -I FORWARD 1 -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = iptables -D FORWARD -i %i -j ACCEPT || true; iptables -D FORWARD -o %i -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$DEFAULT_IFACE -j MASQUERADE || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
-
-[Peer]
-PublicKey = \\$PEER_PUB
-AllowedIPs = 10.9.0.0/24, 10.8.0.0/24
-EOF
-          echo 'wg0.conf created on VPS2.'
-        "
-      `);
-      addLog("Step 11 Complete: wg0.conf created on VPS2.", "success", "exchange");
-
-      // Step 12: VPS2 connects to VPS1 to configure wg1.conf
-      checkCancel();
-      addLog("Step 12: VPS2 configuring wg1.conf on VPS1...", "info", "exchange");
-      await sshExecute(currentTunnel.vps2, `
-        sshpass -p '${currentTunnel.vps1.password}' ssh -o StrictHostKeyChecking=no root@${currentTunnel.vps1.ip} "
-          PRIV_KEY=\\$(cat /etc/wireguard/private.key)
-          PEER_PUB=\\\$(cat /etc/wireguard/wgpub2.key)
-          DEFAULT_IFACE=\\$(ip route ls default | awk '/default/ {for(i=1;i<=NF;i++) if(\$i=="dev") print \$(i+1)}' | head -n 1)
-          if [ -z "\\$DEFAULT_IFACE" ]; then DEFAULT_IFACE="eth0"; fi
-          cat > /etc/wireguard/wg1.conf << EOF
-[Interface]
-PrivateKey = \$PRIV_KEY
-Address = 10.9.0.1/24
-ListenPort = 51820
-MTU = 1280
-Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.\$DEFAULT_IFACE.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
-
-[Peer]
-PublicKey = \\$PEER_PUB
-Endpoint = ${currentTunnel.vps2.ip}:51820
-AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = 25
-EOF
-          echo 'wg1.conf created on VPS1.'
-        "
-      `);
-      addLog("Step 12 Complete: wg1.conf created on VPS1.", "success", "exchange");
-
-      // Step 13: Configure wg-easy and launch wireguard on both VPS
-      checkCancel();
-      addLog("Step 13: Configuring wg-easy and launching WireGuard on both servers...", "info", "exchange");
-      
-      await sshExecute(currentTunnel.vps1, `
-        docker stop wg-easy || true
-        docker rm wg-easy || true
-        echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
-        sysctl -p /etc/sysctl.d/99-wireguard.conf
-        
-        # Update MTU for existing clients if any
-        if [ -d /etc/wireguard/clients ]; then
-          find /etc/wireguard/clients -name "*.conf" -exec sed -i 's/MTU = .*/MTU = 1280/' {} + || true
-        fi
-        # Fix ListenPort conflict if wg0.conf was generated previously with default port
-        # wg-easy overwrites changes to wg0.conf, so we must delete it to force regeneration
-        if grep -q "ListenPort = 51820" /etc/wireguard/wg0.conf 2>/dev/null; then
-          rm -f /etc/wireguard/wg0.conf
-        fi
-        
-        docker run -d \\
-          --name=wg-easy \\
-          --network host \\
-          -e WG_HOST=${currentTunnel.vps1.ip} \\
-          -e WG_PORT=51821 \\
-          -e PORT=51822 \\
-          -e PASSWORD_HASH='$2a$10$jB0akgOdR4cShIVoDFO3zuNvuk/IvmmdxbQKkNIYu8zOy363gdGXC' \\
-          -e WG_DEFAULT_DNS=1.1.1.1 \\
-          -e WG_DEFAULT_ADDRESS=10.8.0.x \\
-          -e WG_MTU=1280 \\
-          -e WG_ALLOWED_IPS=0.0.0.0/0 \\
-          -v /etc/wireguard:/etc/wireguard \\
-          --cap-add=NET_ADMIN \\
-          --cap-add=SYS_MODULE \\
-          --restart unless-stopped \\
-          ghcr.io/wg-easy/wg-easy
-      `);
-
-      await sshExecute(currentTunnel.vps2, "systemctl enable wg-quick@wg0 && systemctl restart wg-quick@wg0");
-      await sshExecute(currentTunnel.vps1, "systemctl enable wg-quick@wg1 && systemctl restart wg-quick@wg1");
-      
-      addLog("Verifying secure tunnel (VPS1 pinging VPS2)...", "info", "exchange");
+      addLog("Step 5: Verifying secure tunnel (VPS1 pinging VPS2)...", "info", "exchange");
       const pingRes = await sshExecute(currentTunnel.vps1, "ping -c 3 10.9.0.2");
       if (pingRes.code === 0) {
         addLog("Secure tunnel verified successfully!", "success", "exchange");
@@ -1918,11 +2010,8 @@ EOF
         addLog("Tunnel verification failed. Ping to 10.9.0.2 did not succeed.", "error", "exchange");
       }
 
-      addLog("Step 13 Complete: wg-easy started and tunnels verified.", "success", "exchange");
-
       updateActiveTunnel({ status: 'deployed' });
       addLog("Double VPN Deployment Successful!", "success", "exchange");
-      // setIsDeploying(false);
       setActiveTab("overview");
 
     } catch (error) {
@@ -1933,7 +2022,6 @@ EOF
         addLog(`Deployment Failed: ${message}`, "error", "exchange");
       }
       updateActiveTunnel({ status: 'failed' });
-      // setIsDeploying(false);
     }
   };
 
@@ -2059,16 +2147,16 @@ EOF
       `Kernel: Linux 6.1.0-18-amd64`,
       `Memory: ${Math.floor(Math.random() * 1000)}MB / 2048MB`,
       `\n--- WireGuard Status ---`,
-      vpsId === 'vps1' ? `interface: wg0\n  public key: ${activeTunnel.vps1.wg0PublicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps2.wg0PublicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps2.ip}:51820\n  allowed ips: 10.0.0.2/32\n  latest handshake: 5 seconds ago` : `interface: wg0\n  public key: ${activeTunnel.vps2.wg0PublicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps1.wg0PublicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps1.ip}:51820\n  allowed ips: 10.0.0.1/32\n  latest handshake: 5 seconds ago`,
+      vpsId === 'vps1' ? `interface: wg-gate\n  public key: ${activeTunnel.vps1.wgGatePublicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps2.wgTun2PublicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps2.ip}:51820\n  allowed ips: 10.0.0.2/32\n  latest handshake: 5 seconds ago` : `interface: wg-tun2\n  public key: ${activeTunnel.vps2.wgTun2PublicKey || 'N/A'}\n  listening port: 51820\n\npeer: ${activeTunnel.vps1.wgTun1PublicKey || 'N/A'}\n  endpoint: ${activeTunnel.vps1.ip}:51820\n  allowed ips: 10.0.0.1/32\n  latest handshake: 5 seconds ago`,
       `\n--- Firewall Rules (iptables) ---`,
-      `-A FORWARD -i wg0 -j ACCEPT`,
-      `-A FORWARD -o wg0 -j ACCEPT`,
+      `-A FORWARD -i wg-gate -j ACCEPT`,
+      `-A FORWARD -o wg-gate -j ACCEPT`,
       `-t nat -A POSTROUTING -o eth0 -j MASQUERADE`,
       `\n--- Recent System Logs (journalctl) ---`,
-      `[${new Date().toISOString()}] wg-quick[123]: [#] ip link add wg0 type wireguard`,
-      `[${new Date().toISOString()}] wg-quick[123]: [#] wg setconf wg0 /dev/fd/63`,
-      `[${new Date().toISOString()}] wg-quick[123]: [#] ip -4 address add 10.0.0.1/24 dev wg0`,
-      `[${new Date().toISOString()}] wg-quick[123]: [#] ip link set mtu 1420 up dev wg0`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] ip link add wg-gate type wireguard`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] wg setconf wg-gate /dev/fd/63`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] ip -4 address add 10.0.0.1/24 dev wg-gate`,
+      `[${new Date().toISOString()}] wg-quick[123]: [#] ip link set mtu 1420 up dev wg-gate`,
     ].join('\n');
 
     setVpsLogs(prev => {
@@ -2125,7 +2213,7 @@ Address = ${peer.allowedIPs}
 DNS = 1.1.1.1
 
 [Peer]
-PublicKey = ${activeTunnel.vps1.wg0PublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}
+PublicKey = ${activeTunnel.vps1.wgGatePublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}
 Endpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`;
@@ -2143,7 +2231,7 @@ PersistentKeepalive = 25`;
 
   const exportAllConfigs = () => {
     const allConfigs = activeTunnel.peers.map(peer => {
-      return `--- ${peer.name} ---\n[Interface]\nPrivateKey = ${peer.privateKey}\nAddress = ${peer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = ${activeTunnel.vps1.wg0PublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}\nEndpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n\n`;
+      return `--- ${peer.name} ---\n[Interface]\nPrivateKey = ${peer.privateKey}\nAddress = ${peer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = ${activeTunnel.vps1.wgGatePublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}\nEndpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25\n\n`;
     }).join('\n');
 
     const blob = new Blob([allConfigs], { type: 'text/plain' });
@@ -3286,12 +3374,12 @@ PersistentKeepalive = 25`;
                   <button 
                     onClick={async () => {
                       addLog("Refreshing WireGuard keys from servers...", "info");
-                      const pub1 = await getVpsPublicKey(activeTunnel.vps1, 'wg1');
-                      const pub1wg0 = await getVpsPublicKey(activeTunnel.vps1, 'wg0');
-                      const pub2 = await getVpsPublicKey(activeTunnel.vps2, 'wg0');
+                      const pub1 = await getVpsPublicKey(activeTunnel.vps1, 'wg-tun1');
+                      const pub1wgGate = await getVpsPublicKey(activeTunnel.vps1, 'wg-gate');
+                      const pub2 = await getVpsPublicKey(activeTunnel.vps2, 'wg-tun2');
                       updateActiveTunnel({
-                        vps1: { ...activeTunnel.vps1, wg1PublicKey: pub1, wg0PublicKey: pub1wg0 },
-                        vps2: { ...activeTunnel.vps2, wg0PublicKey: pub2 }
+                        vps1: { ...activeTunnel.vps1, wgTun1PublicKey: pub1, wgGatePublicKey: pub1wgGate },
+                        vps2: { ...activeTunnel.vps2, wgTun2PublicKey: pub2 }
                       });
                       addLog("Keys refreshed successfully.", "success");
                     }}
@@ -3311,7 +3399,7 @@ PersistentKeepalive = 25`;
                       try {
                         // Fix VPS2 first (Exit Node)
                         const vps2Conf = `[Interface]
-PrivateKey = ${activeTunnel.vps2.wg0PrivateKey || 'GENERATED_ON_SERVER'}
+PrivateKey = ${activeTunnel.vps2.wgTun2PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.2/24
 ListenPort = 51820
 MTU = 1280
@@ -3319,29 +3407,29 @@ PostUp = iptables -I FORWARD 1 -i %i -j ACCEPT; iptables -I FORWARD 1 -o %i -j A
 PostDown = iptables -D FORWARD -i %i -j ACCEPT || true; iptables -D FORWARD -o %i -j ACCEPT || true; iptables -t nat -D POSTROUTING -o \\$(ip route | awk '/default/ {for(i=1;i<=NF;i++) if(\\$i=="dev") print \\$(i+1)}' | head -n 1 || echo eth0) -j MASQUERADE || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
-PublicKey = ${activeTunnel.vps1.wg1PublicKey || ''}
+PublicKey = ${activeTunnel.vps1.wgTun1PublicKey || ''}
 AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`;
 
-                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg0.conf && systemctl restart wg-quick@wg0 || wg-quick up wg0`);
+                        await sshExecute(activeTunnel.vps2, `mkdir -p /etc/wireguard && echo "${vps2Conf}" > /etc/wireguard/wg-tun2.conf && systemctl restart wg-quick@wg-tun2 || wg-quick up wg-tun2`);
                         addLog("VPS2 configuration fixed and restarted.", "success");
 
                         // Fix VPS1 (Gateway)
                         const vps1Conf = `[Interface]
-PrivateKey = ${activeTunnel.vps1.wg1PrivateKey || 'GENERATED_ON_SERVER'}
+PrivateKey = ${activeTunnel.vps1.wgTun1PrivateKey || 'GENERATED_ON_SERVER'}
 Address = 10.9.0.1/24
 ListenPort = 51820
 MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.wg-tun1.rp_filter=2; sysctl -w net.ipv4.conf.wg-gate.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg-tun1 table 200 || true; iptables -t nat -A POSTROUTING -o wg-tun1 -j MASQUERADE; iptables -I FORWARD 1 -i wg-tun1 -j ACCEPT; iptables -I FORWARD 1 -o wg-tun1 -j ACCEPT; iptables -I FORWARD 1 -i wg-gate -j ACCEPT; iptables -I FORWARD 1 -o wg-gate -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg-tun1 table 200 || true; iptables -t nat -D POSTROUTING -o wg-tun1 -j MASQUERADE || true; iptables -D FORWARD -i wg-tun1 -j ACCEPT || true; iptables -D FORWARD -o wg-tun1 -j ACCEPT || true; iptables -D FORWARD -i wg-gate -j ACCEPT || true; iptables -D FORWARD -o wg-gate -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
-PublicKey = ${activeTunnel.vps2.wg0PublicKey || ''}
+PublicKey = ${activeTunnel.vps2.wgTun2PublicKey || ''}
 Endpoint = ${activeTunnel.vps2.ip}:51820
 AllowedIPs = 0.0.0.0/0
 PersistentKeepalive = 25`;
 
-                        await sshExecute(activeTunnel.vps1, `mkdir -p /etc/wireguard && echo "${vps1Conf}" > /etc/wireguard/wg1.conf && systemctl restart wg-quick@wg1 || wg-quick up wg1`);
+                        await sshExecute(activeTunnel.vps1, `mkdir -p /etc/wireguard && echo "${vps1Conf}" > /etc/wireguard/wg-tun1.conf && systemctl restart wg-quick@wg-tun1 || wg-quick up wg-tun1`);
                         addLog("VPS1 configuration fixed and restarted.", "success");
                         
                         // Fix wg-easy MTU
@@ -3353,10 +3441,10 @@ PersistentKeepalive = 25`;
                           if [ -d /etc/wireguard/clients ]; then
                             find /etc/wireguard/clients -name "*.conf" -exec sed -i 's/MTU = .*/MTU = 1280/' {} + || true
                           fi
-                          # Fix ListenPort conflict if wg0.conf was generated previously with default port
-                          # wg-easy overwrites changes to wg0.conf, so we must delete it to force regeneration
-                          if grep -q "ListenPort = 51820" /etc/wireguard/wg0.conf 2>/dev/null; then
-                            rm -f /etc/wireguard/wg0.conf
+                          # Fix ListenPort conflict if wg-gate.conf was generated previously with default port
+                          # wg-easy overwrites changes to wg-gate.conf, so we must delete it to force regeneration
+                          if grep -q "ListenPort = 51820" /etc/wireguard/wg-gate.conf 2>/dev/null; then
+                            rm -f /etc/wireguard/wg-gate.conf
                           fi
                           
                           docker run -d \\
@@ -3407,22 +3495,22 @@ PersistentKeepalive = 25`;
                     <div className="space-y-4">
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
-                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG1 Public Key (Tunnel to VPS2)</label>
+                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG-TUN1 Public Key (Tunnel to VPS2)</label>
                           <div className="flex items-center gap-2">
-                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg1 public-key' in terminal</span>
+                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg-tun1 public-key' in terminal</span>
                             <button 
-                              onClick={() => handleCopy(activeTunnel.vps1.wg1PublicKey || '', 'vps1-wg1-pub')}
+                              onClick={() => handleCopy(activeTunnel.vps1.wgTun1PublicKey || '', 'vps1-wg-tun1-pub')}
                               className="text-zinc-500 hover:text-emerald-500 transition-colors"
                             >
-                              {copied === 'vps1-wg1-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              {copied === 'vps1-wg-tun1-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                             </button>
                           </div>
                         </div>
                         <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
                           <input 
                             type="text"
-                            value={activeTunnel.vps1.wg1PublicKey || ''}
-                            onChange={(e) => updateActiveTunnel({ vps1: { ...activeTunnel.vps1, wg1PublicKey: e.target.value } })}
+                            value={activeTunnel.vps1.wgTun1PublicKey || ''}
+                            onChange={(e) => updateActiveTunnel({ vps1: { ...activeTunnel.vps1, wgTun1PublicKey: e.target.value } })}
                             placeholder="Not Deployed (Enter manually if needed)"
                             className="bg-transparent border-none outline-none w-full text-zinc-300 placeholder:text-zinc-700"
                           />
@@ -3431,22 +3519,22 @@ PersistentKeepalive = 25`;
 
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
-                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG0 Public Key (Client Gateway)</label>
+                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG-GATE Public Key (Client Gateway)</label>
                           <div className="flex items-center gap-2">
-                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg0 public-key' in terminal</span>
+                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg-gate public-key' in terminal</span>
                             <button 
-                              onClick={() => handleCopy(activeTunnel.vps1.wg0PublicKey || '', 'vps1-wg0-pub')}
+                              onClick={() => handleCopy(activeTunnel.vps1.wgGatePublicKey || '', 'vps1-wg-gate-pub')}
                               className="text-zinc-500 hover:text-emerald-500 transition-colors"
                             >
-                              {copied === 'vps1-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              {copied === 'vps1-wg-gate-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                             </button>
                           </div>
                         </div>
                         <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
                           <input 
                             type="text"
-                            value={activeTunnel.vps1.wg0PublicKey || ''}
-                            onChange={(e) => updateActiveTunnel({ vps1: { ...activeTunnel.vps1, wg0PublicKey: e.target.value } })}
+                            value={activeTunnel.vps1.wgGatePublicKey || ''}
+                            onChange={(e) => updateActiveTunnel({ vps1: { ...activeTunnel.vps1, wgGatePublicKey: e.target.value } })}
                             placeholder="Not Deployed (Enter manually if needed)"
                             className="bg-transparent border-none outline-none w-full text-zinc-300 placeholder:text-zinc-700"
                           />
@@ -3470,22 +3558,22 @@ PersistentKeepalive = 25`;
                     <div className="space-y-4">
                       <div className="space-y-2">
                         <div className="flex items-center justify-between">
-                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG0 Public Key (Tunnel from VPS1)</label>
+                          <label className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">WG-TUN2 Public Key (Tunnel from VPS1)</label>
                           <div className="flex items-center gap-2">
-                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg0 public-key' in terminal</span>
+                            <span className="text-[9px] text-zinc-600 italic">Run 'wg show wg-tun2 public-key' in terminal</span>
                             <button 
-                              onClick={() => handleCopy(activeTunnel.vps2.wg0PublicKey || '', 'vps2-wg0-pub')}
+                              onClick={() => handleCopy(activeTunnel.vps2.wgTun2PublicKey || '', 'vps2-wg-tun2-pub')}
                               className="text-zinc-500 hover:text-emerald-500 transition-colors"
                             >
-                              {copied === 'vps2-wg0-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              {copied === 'vps2-wg-tun2-pub' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
                             </button>
                           </div>
                         </div>
                         <div className="bg-zinc-950 p-3 rounded-lg border border-zinc-800 font-mono text-xs text-zinc-300 break-all flex items-center gap-2">
                           <input 
                             type="text"
-                            value={activeTunnel.vps2.wg0PublicKey || ''}
-                            onChange={(e) => updateActiveTunnel({ vps2: { ...activeTunnel.vps2, wg0PublicKey: e.target.value } })}
+                            value={activeTunnel.vps2.wgTun2PublicKey || ''}
+                            onChange={(e) => updateActiveTunnel({ vps2: { ...activeTunnel.vps2, wgTun2PublicKey: e.target.value } })}
                             placeholder="Not Deployed (Enter manually if needed)"
                             className="bg-transparent border-none outline-none w-full text-zinc-300 placeholder:text-zinc-700"
                           />
@@ -3502,7 +3590,7 @@ PersistentKeepalive = 25`;
                       <h4 className="text-sm font-bold text-emerald-500 uppercase tracking-wider">How to use these keys</h4>
                       <p className="text-xs text-zinc-400 leading-relaxed">
                         If the automated deployment fails with a "Configuration parsing error" or "Line unrecognized", it usually means one node couldn't retrieve the other's public key. 
-                        You can copy the <strong>VPS2 WG0 Public Key</strong> and manually paste it into the <code>[Peer]</code> section of <code>/etc/wireguard/wg1.conf</code> on <strong>VPS1</strong>.
+                        You can copy the <strong>VPS2 WG-TUN2 Public Key</strong> and manually paste it into the <code>[Peer]</code> section of <code>/etc/wireguard/wg-tun1.conf</code> on <strong>VPS1</strong>.
                       </p>
                     </div>
                   </div>
@@ -4203,7 +4291,7 @@ docker run -d \\
                         </pre>
                       </div>
                       <div className="relative group">
-                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg1.conf (VPS2 Tunnel)</div>
+                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg-tun1.conf (VPS2 Tunnel)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
 PrivateKey = <VPS1_PRIVATE_KEY>
@@ -4211,8 +4299,8 @@ Address = 10.9.0.1/24
 ListenPort = 51820
 MTU = 1280
 Table = off
-PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.<PRIMARY_IF>.rp_filter=2; sysctl -w net.ipv4.conf.wg1.rp_filter=2; sysctl -w net.ipv4.conf.wg0.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg1 table 200 || true; iptables -t nat -A POSTROUTING -o wg1 -j MASQUERADE; iptables -I FORWARD 1 -i wg1 -j ACCEPT; iptables -I FORWARD 1 -o wg1 -j ACCEPT; iptables -I FORWARD 1 -i wg0 -j ACCEPT; iptables -I FORWARD 1 -o wg0 -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg1 table 200 || true; iptables -t nat -D POSTROUTING -o wg1 -j MASQUERADE || true; iptables -D FORWARD -i wg1 -j ACCEPT || true; iptables -D FORWARD -o wg1 -j ACCEPT || true; iptables -D FORWARD -i wg0 -j ACCEPT || true; iptables -D FORWARD -o wg0 -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
+PostUp = sysctl -w net.ipv4.conf.all.rp_filter=2; sysctl -w net.ipv4.conf.default.rp_filter=2; sysctl -w net.ipv4.conf.<PRIMARY_IF>.rp_filter=2; sysctl -w net.ipv4.conf.wg-tun1.rp_filter=2; sysctl -w net.ipv4.conf.wg-gate.rp_filter=2 || true; ip rule add from 10.8.0.0/24 table 200 priority 10; ip rule add from 10.9.0.1 table 200 priority 10 || true; ip route add default dev wg-tun1 table 200 || true; iptables -t nat -A POSTROUTING -o wg-tun1 -j MASQUERADE; iptables -I FORWARD 1 -i wg-tun1 -j ACCEPT; iptables -I FORWARD 1 -o wg-tun1 -j ACCEPT; iptables -I FORWARD 1 -i wg-gate -j ACCEPT; iptables -I FORWARD 1 -o wg-gate -j ACCEPT; iptables -t mangle -I FORWARD 1 -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+PostDown = ip rule del from 10.8.0.0/24 table 200 priority 10 || true; ip rule del from 10.9.0.1 table 200 priority 10 || true; ip route del default dev wg-tun1 table 200 || true; iptables -t nat -D POSTROUTING -o wg-tun1 -j MASQUERADE || true; iptables -D FORWARD -i wg-tun1 -j ACCEPT || true; iptables -D FORWARD -o wg-tun1 -j ACCEPT || true; iptables -D FORWARD -i wg-gate -j ACCEPT || true; iptables -D FORWARD -o wg-gate -j ACCEPT || true; iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu || true
 
 [Peer]
 PublicKey = <VPS2_PUBLIC_KEY>
@@ -4227,7 +4315,7 @@ PersistentKeepalive = 25`}
                   <Card title="VPS2 (Exit Node) - Double VPN Config" icon={Terminal}>
                     <div className="space-y-4">
                       <div className="relative group">
-                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg0.conf (Inbound)</div>
+                        <div className="absolute -top-2 left-4 px-2 bg-zinc-900 text-[8px] font-bold text-zinc-500 uppercase">/etc/wireguard/wg-tun2.conf (Inbound)</div>
                         <pre className="bg-zinc-950 p-6 pt-8 rounded-xl border border-zinc-800 text-[11px] font-mono text-emerald-500/80 overflow-x-auto leading-relaxed">
 {`[Interface]
 PrivateKey = <VPS2_PRIVATE_KEY>
@@ -5215,7 +5303,7 @@ AllowedIPs = 10.9.0.0/24, 10.8.0.0/24`}
                 
                 <div className="p-4 bg-white rounded-2xl shadow-inner">
                   <QRCodeSVG 
-                    value={`[Interface]\nPrivateKey = ${selectedPeer.privateKey}\nAddress = ${selectedPeer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = ${activeTunnel.vps1.wg0PublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}\nEndpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`}
+                    value={`[Interface]\nPrivateKey = ${selectedPeer.privateKey}\nAddress = ${selectedPeer.allowedIPs}\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = ${activeTunnel.vps1.wgGatePublicKey || '8xJ2vK9zL3mN4pQ5rS6tU7vW8xY9z0a1b2c3d4e5f6g='}\nEndpoint = ${activeTunnel.vps1.ip || 'XXX.XXX.XXX.XXX'}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`}
                     size={200}
                     level="H"
                   />
